@@ -1,0 +1,32 @@
+{
+  "name": "hfdm-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@radix-ui/react-checkbox": "latest",
+    "@radix-ui/react-progress": "latest",
+    "@radix-ui/react-slot": "latest",
+    "class-variance-authority": "latest",
+    "clsx": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "tailwind-merge": "latest"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

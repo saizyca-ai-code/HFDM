@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hfdm"
+version = "0.1.0"
+description = "A LAN-first Hugging Face download manager"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "huggingface-hub==1.26.1",
+  "tqdm>=4.70,<5",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+]
+
+[project.scripts]
+hfdm = "hfdm.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hfdm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --basetemp=.pytest-tmp"

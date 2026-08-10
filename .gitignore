@@ -1,0 +1,28 @@
+# Local Python runtimes
+.venv/
+.runtime/
+python_embed/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.integration-tmp/
+.coverage
+htmlcov/
+
+# HFDM runtime state
+data/
+download/
+.pycache/
+.env
+
+# Frontend dependencies and compiler caches
+**/node_modules/
+**/*.tsbuildinfo
+
+# Machine-local development tools (for example tools/bun.exe)
+tools/
+
+# app/frontend/dist is intentionally versioned because HFDM serves it directly.
