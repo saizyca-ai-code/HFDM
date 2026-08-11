@@ -2,6 +2,10 @@
 .venv/
 .runtime/
 python_embed/
+packages/
+packages.next/
+packages.previous/
+build/
 
 # Python caches and test output
 __pycache__/

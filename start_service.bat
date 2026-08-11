@@ -3,17 +3,23 @@ setlocal EnableExtensions EnableDelayedExpansion
 title HFDM
 
 REM ============================================================================
-REM HFDM settings - edit these values to match your machine or LAN.
+REM HFDM settings - edit these defaults to match your machine or LAN.
+REM Existing HFDM_* environment variables override the defaults for automation.
 REM
 REM HFDM_HOST          0.0.0.0 = allow LAN access; 127.0.0.1 = local machine only
 REM HFDM_PORT          TCP port used by the web service (1-65535)
 REM HFDM_OPEN_BROWSER  1 = open the page after startup; 0 = do not open it
 REM HFDM_BROWSER_URL   Optional page to open. Leave empty to derive it automatically.
 REM ============================================================================
-set "HFDM_HOST=0.0.0.0"
-set "HFDM_PORT=8765"
-set "HFDM_OPEN_BROWSER=1"
-set "HFDM_BROWSER_URL="
+set "HFDM_DEFAULT_HOST=0.0.0.0"
+set "HFDM_DEFAULT_PORT=8765"
+set "HFDM_DEFAULT_OPEN_BROWSER=1"
+set "HFDM_DEFAULT_BROWSER_URL="
+
+if not defined HFDM_HOST set "HFDM_HOST=%HFDM_DEFAULT_HOST%"
+if not defined HFDM_PORT set "HFDM_PORT=%HFDM_DEFAULT_PORT%"
+if not defined HFDM_OPEN_BROWSER set "HFDM_OPEN_BROWSER=%HFDM_DEFAULT_OPEN_BROWSER%"
+if not defined HFDM_BROWSER_URL set "HFDM_BROWSER_URL=%HFDM_DEFAULT_BROWSER_URL%"
 
 REM Resolve every path from this batch file so the whole folder stays portable.
 set "HFDM_ROOT=%~dp0"

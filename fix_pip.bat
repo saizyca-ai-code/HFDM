@@ -24,10 +24,10 @@ if errorlevel 1 goto failed
 "%HFDM_PYTHON%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 goto failed
 
-"%HFDM_PYTHON%" -m pip install -r "%HFDM_ROOT%requirements.txt"
+call "%HFDM_ROOT%manage_runtime.bat" dev
 if errorlevel 1 goto failed
 
-echo [OK] Embedded Python packages are ready.
+echo [OK] Embedded Python packaging tools and development packages are ready.
 pause
 exit /b 0
 

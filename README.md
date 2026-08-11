@@ -19,63 +19,103 @@ HFDM is a LAN-first Hugging Face model download manager. It provides a React/sha
 
 ## Requirements
 
-- Python 3.12 embedded distribution in `python_embed` for the portable folder
+- A Windows embedded Python distribution in `python_embed` for development
 - Bun only when rebuilding the frontend
-- Network access to Hugging Face
+- Network access when resolving or installing dependencies and downloading from Hugging Face
 
-## Portable embedded-Python layout
-
-Copy the complete HFDM folder, then run `start_service.bat` from its new location.
-The launcher always uses `python_embed\python.exe` and derives every path from the
-batch file's location. It never selects a machine-wide Python installation.
-
-HFDM itself is loaded directly from `app\src`, so do not run `pip install .` or
-`pip install -e .` for the application. Only third-party dependencies belong in the
-embedded interpreter:
+## Portable development layout
 
 ```text
-python_embed\python.exe -m pip install -r requirements.txt
+HFDM/
+├─ app/                 source and built frontend
+├─ python_embed/        interpreter and Python packaging tools
+├─ packages/            replaceable third-party development dependencies
+├─ data/                SQLite runtime state
+├─ download/            completed repository files
+├─ scripts/             tracked runtime/build implementation
+├─ manage_runtime.bat
+├─ build_portable.bat
+└─ start_service.bat
 ```
 
-If pip or the bundled dependencies need repair, run `fix_pip.bat`.
+The launcher always uses `python_embed\python.exe` and derives paths from the batch
+file location. HFDM itself is loaded directly from `app\src`; do not install HFDM
+into the interpreter. Third-party application and test dependencies are isolated in
+`packages`, while pip/setuptools may remain inside `python_embed` as development
+tools.
 
-`python_embed`, runtime data, frontend dependencies, and local tools are deliberately
-excluded from Git. They belong to a machine-local portable folder, not the source
-history. The built `app\frontend\dist` is versioned because HFDM serves it directly.
+`python_embed`, `packages`, runtime data, frontend dependencies, local tools, and
+portable build output are excluded from Git. The built `app\frontend\dist` is
+versioned because the service serves it directly.
 
-For a non-starting verification that does not keep the server running:
+## Runtime management
+
+After adding or changing a direct dependency in `requirements.txt` or
+`requirements-dev.txt`, resolve fresh lock files and rebuild development packages:
+
+```text
+manage_runtime.bat lock
+manage_runtime.bat dev
+manage_runtime.bat check
+```
+
+For a temporary development installation or update:
+
+```text
+manage_runtime.bat pip PACKAGE
+```
+
+Record intentional dependencies in the appropriate requirements file and regenerate
+the locks before release. When replacing the embedded Python version, replace
+`python_embed`, ensure pip is available, then run `manage_runtime.bat dev`; the
+manager regenerates the version-specific `pythonXY._pth` search paths.
+
+`fix_pip.bat` repairs pip/setuptools/wheel inside the development interpreter and
+then rebuilds `packages` from the development lock.
+
+## Portable release build
+
+`build_portable.bat` creates a clean release from interpreter core files, the runtime
+lock, application source, and built frontend. It does not copy development
+site-packages or test dependencies.
+
+```text
+build_portable.bat
+```
+
+Outputs:
+
+```text
+build/HFDM-portable/
+build/HFDM-<version>-windows-x64.zip
+```
+
+The build runs `start_service.bat --check` inside staging before publishing the
+folder and ZIP. For a non-starting check of the development folder:
 
 ```text
 start_service.bat --check
 ```
 
-## Setup
-
-The portable folder contains its runtime dependencies and built web interface. Bun
-is a local tool and is not versioned; place `bun.exe` in `tools`, or use a Bun
-installation available on `PATH`.
-
-To install development-only Python test dependencies:
-
-```powershell
-.\python_embed\python.exe -m pip install -r .\requirements-dev.txt
-```
+For frontend development, place `bun.exe` in `tools`, or use Bun from `PATH`.
 
 ## Run
 
 At the top of `start_service.bat`, edit the following settings when needed:
 
 ```bat
-set "HFDM_HOST=0.0.0.0"
-set "HFDM_PORT=8765"
-set "HFDM_OPEN_BROWSER=1"
-set "HFDM_BROWSER_URL="
+set "HFDM_DEFAULT_HOST=0.0.0.0"
+set "HFDM_DEFAULT_PORT=8765"
+set "HFDM_DEFAULT_OPEN_BROWSER=1"
+set "HFDM_DEFAULT_BROWSER_URL="
 ```
 
 - Use `0.0.0.0` for trusted-LAN access or `127.0.0.1` for local-only access.
 - `HFDM_OPEN_BROWSER=1` opens the local page only after Uvicorn reports ready.
 - Leave `HFDM_BROWSER_URL` empty to derive `http://127.0.0.1:<port>` when listening
   on all interfaces. Set it explicitly if a hostname or different page is preferred.
+- Existing `HFDM_HOST`, `HFDM_PORT`, `HFDM_OPEN_BROWSER`, and `HFDM_BROWSER_URL`
+  environment variables override these defaults for automation and verification.
 
 Then run:
 
@@ -106,8 +146,9 @@ Run the API and Vite separately:
 Run verification:
 
 ```powershell
-.\python_embed\python.exe -m pytest .\app\tests
+.\manage_runtime.bat check
 .\tools\bun.exe run --cwd .\app\frontend build
+.\build_portable.bat
 ```
 
 ## Data layout
