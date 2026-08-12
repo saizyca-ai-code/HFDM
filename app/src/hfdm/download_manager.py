@@ -16,6 +16,7 @@ from typing import Any
 from .config import AppPaths
 from .database import Database, utc_now
 from .events import EventBroker
+from .reconciliation import DownloadReconciler
 from .schemas import RepoResolution
 
 
@@ -32,7 +33,14 @@ class ActiveWorker:
 
 
 class DownloadManager:
-    def __init__(self, paths: AppPaths, db: Database, broker: EventBroker):
+    def __init__(
+        self,
+        paths: AppPaths,
+        db: Database,
+        broker: EventBroker,
+        *,
+        reconciliation_interval: float = 30.0,
+    ):
         self.paths = paths
         self.db = db
         self.broker = broker
@@ -44,12 +52,16 @@ class DownloadManager:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_cleanup = 0.0
+        self._last_reconciliation = 0.0
+        self._reconciliation_interval = reconciliation_interval
+        self._reconciler = DownloadReconciler(paths, db)
         self._normalize_task_destinations()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self.db.recover_interrupted()
+        self.reconcile()
         self._thread = threading.Thread(target=self._run, name="hfdm-coordinator", daemon=True)
         self._thread.start()
 
@@ -124,6 +136,70 @@ class DownloadManager:
         assert created is not None
         return created
 
+    def reconfigure_task(
+        self,
+        task_id: str,
+        resolution: RepoResolution,
+        selected_paths: list[str],
+        token: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        task = self._require_task(task_id)
+        if task["status"] in {"downloading", "pausing"}:
+            raise DownloadManagerError("Pause the active task before changing its file selection")
+        selected = self._selected_repo_files(resolution, selected_paths)
+        update_available = task["commit_hash"] != resolution.commit_hash
+        editable = task["status"] in {"queued", "paused", "auth_required"}
+        if update_available or not editable:
+            created = self.create_task(resolution, [item.path for item in selected], token)
+            self.db.delete_task(task_id)
+            self._tokens.pop(task_id, None)
+            self._publish(task_id, "replaced")
+            return created, True
+
+        destination = self.task_destination(task)
+        missing_bytes = sum(
+            item.size for item in selected if not (destination / Path(item.path)).is_file()
+        )
+        self._assert_capacity(missing_bytes)
+        current = {file["path"]: file for file in task["files"]}
+        default_status = "paused" if task["status"] in {"paused", "auth_required"} else "queued"
+        file_rows: list[dict[str, Any]] = []
+        for item in selected:
+            existing = current.get(item.path)
+            unchanged = existing is not None and int(existing["size"]) == item.size
+            file_rows.append(
+                {
+                    "id": existing["id"] if unchanged else str(uuid.uuid4()),
+                    "task_id": task_id,
+                    "path": item.path,
+                    "size": item.size,
+                    "status": existing["status"] if unchanged else default_status,
+                    "downloaded_bytes": existing["downloaded_bytes"] if unchanged else 0,
+                    "error": existing.get("error") if unchanged else None,
+                    "local_status": existing.get("local_status", "unknown") if unchanged else "unknown",
+                    "observed_size": existing.get("observed_size") if unchanged else None,
+                    "observed_mtime_ns": existing.get("observed_mtime_ns") if unchanged else None,
+                    "observed_sha256": existing.get("observed_sha256") if unchanged else None,
+                    "last_reconciled_at": existing.get("last_reconciled_at") if unchanged else None,
+                }
+            )
+        try:
+            self.db.replace_editable_task_files(
+                task_id,
+                file_rows,
+                requires_token=True if token else None,
+            )
+        except ValueError as exc:
+            raise DownloadManagerError(str(exc)) from exc
+        if token:
+            self._tokens[task_id] = token
+            if task["status"] == "auth_required":
+                self.db.bulk_file_status(task_id, ["paused"], "queued")
+                self.db.update_task(task_id, status="queued", error=None)
+        self._publish(task_id, "configuration_updated")
+        self._wake.set()
+        return self._require_task(task_id), False
+
     def pause(self, task_id: str) -> dict[str, Any]:
         task = self._require_task(task_id)
         if task["status"] in {"completed", "cancelled", "failed"}:
@@ -155,7 +231,36 @@ class DownloadManager:
         return self._require_task(task_id)
 
     def retry(self, task_id: str, token: str | None = None) -> dict[str, Any]:
+        task = self._require_task(task_id)
+        if task["status"] == "failed":
+            self.db.begin_retry_attempt(task_id)
         return self.resume(task_id, token=token)
+
+    def redownload_missing(self, task_id: str, token: str | None = None) -> dict[str, Any]:
+        task = self._require_task(task_id)
+        if task["requires_token"] and not token:
+            raise DownloadManagerError("A Hugging Face token is required to restore these files")
+        if token:
+            self._tokens[task_id] = token
+        try:
+            restored_paths = self.db.prepare_missing_redownload(task_id)
+        except ValueError as exc:
+            raise DownloadManagerError(str(exc)) from exc
+        self._publish(task_id, "redownload_queued")
+        self.broker.publish(
+            {"type": "redownload_queued", "task_id": task_id, "files": restored_paths}
+        )
+        self._wake.set()
+        return self._require_task(task_id)
+
+    def reconcile(self, task_id: str | None = None) -> int:
+        with self._lock:
+            allow_hash = not self._active
+        updated = self._reconciler.run(task_id, allow_hash=allow_hash)
+        self._last_reconciliation = time.monotonic()
+        if updated:
+            self.broker.publish({"type": "reconciled", "task_id": task_id, "updated": updated})
+        return updated
 
     def cancel(self, task_id: str) -> dict[str, Any]:
         self._require_task(task_id)
@@ -190,6 +295,22 @@ class DownloadManager:
         self._tokens.pop(task_id, None)
         self._publish(task_id, "deleted")
 
+    def delete_files(self, task_id: str) -> dict[str, Any]:
+        task = self._require_task(task_id)
+        with self._lock:
+            if any(worker.task_id == task_id for worker in self._active.values()):
+                raise DownloadManagerError("Cannot remove files while a transfer is active")
+        if not self.db.get_settings()["allow_delete_files"]:
+            raise DownloadManagerError("Physical file deletion is disabled")
+        if self.db.destination_reference_count(task["destination"], task_id) > 0:
+            raise DownloadManagerError("The destination is referenced by another history record")
+        destination = self.task_destination(task)
+        if destination.exists():
+            self._remove_tree(destination)
+        self.reconcile(task_id)
+        self._publish(task_id, "files_deleted")
+        return self._require_task(task_id)
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
@@ -197,6 +318,8 @@ class DownloadManager:
                 if time.monotonic() - self._last_cleanup >= 60:
                     self._cleanup_expired()
                     self._last_cleanup = time.monotonic()
+                if time.monotonic() - self._last_reconciliation >= self._reconciliation_interval:
+                    self.reconcile()
             except Exception as exc:
                 self.broker.publish({"type": "coordinator_error", "error": str(exc)})
             self._wake.wait(0.35)
@@ -210,7 +333,15 @@ class DownloadManager:
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         for task_id in self.db.expired_completed_tasks(cutoff):
             try:
-                self.delete(task_id, delete_files=True)
+                task = self._require_task(task_id)
+                destination = self.task_destination(task)
+                if (
+                    destination.exists()
+                    and self.db.destination_reference_count(task["destination"], task_id) == 0
+                ):
+                    self._remove_tree(destination)
+                self.reconcile(task_id)
+                self._publish(task_id, "files_expired")
             except DownloadManagerError as exc:
                 self.broker.publish({"type": "cleanup_error", "task_id": task_id, "error": str(exc)})
 
@@ -368,6 +499,8 @@ class DownloadManager:
             status = "completed"
             self._tokens.pop(task_id, None)
         self.db.update_task(task_id, status=status)
+        if status in {"completed", "failed"}:
+            self.reconcile(task_id)
         self._publish(task_id, status)
 
     def _assert_capacity(self, requested_bytes: int) -> None:
@@ -391,6 +524,26 @@ class DownloadManager:
         if not task:
             raise DownloadManagerError("找不到下載任務")
         return task
+
+    def _selected_repo_files(
+        self,
+        resolution: RepoResolution,
+        selected_paths: list[str],
+    ) -> list[Any]:
+        available = {item.path: item for item in resolution.files}
+        selected = []
+        seen: set[str] = set()
+        for path in selected_paths:
+            normalized = self._safe_relative(path).as_posix()
+            if normalized in seen:
+                continue
+            if normalized not in available:
+                raise DownloadManagerError(f"Repo 中找不到檔案：{normalized}")
+            seen.add(normalized)
+            selected.append(available[normalized])
+        if not selected:
+            raise DownloadManagerError("至少選擇一個檔案")
+        return selected
 
     def task_destination(self, task: dict[str, Any]) -> Path:
         owner, repo = task["repo_id"].split("/", 1)

@@ -19,6 +19,8 @@ TaskStatus = Literal[
     "cancelled",
 ]
 
+LocalAvailability = Literal["available", "partial", "moved", "changed", "unknown"]
+
 
 class RepoResolveRequest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
@@ -50,6 +52,19 @@ class ResumeTaskRequest(BaseModel):
     hf_token: SecretStr | None = None
 
 
+class RedownloadTaskRequest(BaseModel):
+    hf_token: SecretStr | None = None
+
+
+class InspectTaskRequest(BaseModel):
+    hf_token: SecretStr | None = None
+
+
+class UpdateTaskConfigurationRequest(BaseModel):
+    selected_files: list[str] = Field(min_length=1)
+    hf_token: SecretStr | None = None
+
+
 class TaskFileView(BaseModel):
     id: str
     path: str
@@ -57,14 +72,21 @@ class TaskFileView(BaseModel):
     status: str
     downloaded_bytes: int
     error: str | None = None
+    local_status: LocalAvailability = "unknown"
+    observed_size: int | None = None
+    observed_mtime_ns: int | None = None
 
 
 class TaskView(BaseModel):
     id: str
+    provider: str = "huggingface"
+    repo_type: str = "model"
     repo_id: str
     requested_revision: str
     commit_hash: str
     status: TaskStatus
+    transfer_status: str
+    local_availability: LocalAvailability = "unknown"
     total_bytes: int
     downloaded_bytes: int
     speed_bps: float = 0
@@ -72,8 +94,51 @@ class TaskView(BaseModel):
     requires_token: bool
     created_at: datetime
     updated_at: datetime
+    completed_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
     error: str | None = None
     files: list[TaskFileView] = Field(default_factory=list)
+
+
+class TaskInspection(BaseModel):
+    resolution: RepoResolution
+    selected_files: list[str]
+    unavailable_selected_files: list[str] = Field(default_factory=list)
+    update_available: bool
+    can_update_in_place: bool
+
+
+class TaskConfigurationResult(BaseModel):
+    task: TaskView
+    created_new: bool
+    update_available: bool
+
+
+class LibraryFileView(BaseModel):
+    record_id: str
+    id: str
+    path: str
+    size: int
+    local_status: LocalAvailability
+    observed_size: int | None = None
+
+
+class LibraryItemView(BaseModel):
+    key: str
+    provider: str
+    repo_type: str
+    repo_id: str
+    requested_revision: str
+    commit_hash: str
+    destination: str
+    latest_record_id: str
+    latest_transfer_status: str
+    local_availability: LocalAvailability
+    history_count: int
+    total_bytes: int
+    requires_token: bool
+    restore_record_ids: list[str] = Field(default_factory=list)
+    files: list[LibraryFileView] = Field(default_factory=list)
 
 
 class AppSettingsView(BaseModel):

@@ -10,6 +10,10 @@ from typing import Any, Iterable
 from .config import DEFAULT_SETTINGS
 
 
+SCHEMA_VERSION = 2
+TERMINAL_TRANSFER_STATUSES = {"completed", "failed", "cancelled"}
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -28,6 +32,9 @@ class Database:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        existed = self.path.exists() and self.path.stat().st_size > 0
+        if existed and self._requires_v2_migration():
+            self._backup_v1_database()
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -74,12 +81,171 @@ class Database:
                 conn.execute("ALTER TABLE tasks ADD COLUMN speed_bps REAL NOT NULL DEFAULT 0")
             if "eta_seconds" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN eta_seconds INTEGER")
+            current_version = self._schema_version(conn)
+            if current_version < SCHEMA_VERSION:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._migrate_to_v2(conn)
+                except Exception:
+                    conn.rollback()
+                    raise
+                else:
+                    conn.commit()
             for key, value in DEFAULT_SETTINGS.items():
                 conn.execute(
                     "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
                     (key, json.dumps(value)),
                 )
             conn.execute("PRAGMA optimize")
+
+    @property
+    def v1_backup_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.v1.bak")
+
+    def _requires_v2_migration(self) -> bool:
+        with sqlite3.connect(self.path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            if "tasks" not in tables:
+                return False
+            if "schema_version" not in tables:
+                return True
+            row = conn.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+            return row is None or int(row[0]) < SCHEMA_VERSION
+
+    def _backup_v1_database(self) -> None:
+        backup_path = self.v1_backup_path
+        if backup_path.exists():
+            return
+        with sqlite3.connect(self.path) as source, sqlite3.connect(backup_path) as target:
+            source.backup(target)
+
+    @staticmethod
+    def _schema_version(conn: sqlite3.Connection) -> int:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+        ).fetchone()
+        if not exists:
+            return 1
+        row = conn.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
+        return int(row[0]) if row else 1
+
+    def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
+        statements = (
+            "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)",
+            """
+            CREATE TABLE IF NOT EXISTS download_records (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                repo_type TEXT NOT NULL,
+                remote_id TEXT NOT NULL,
+                requested_revision TEXT NOT NULL,
+                resolved_revision TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                transfer_status TEXT NOT NULL,
+                local_availability TEXT NOT NULL DEFAULT 'unknown',
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                speed_bps REAL NOT NULL DEFAULT 0,
+                eta_seconds INTEGER,
+                requires_token INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_reconciled_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS download_attempts (
+                id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL REFERENCES download_records(id) ON DELETE CASCADE,
+                attempt_number INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                average_speed_bps REAL NOT NULL DEFAULT 0,
+                peak_speed_bps REAL NOT NULL DEFAULT 0,
+                error TEXT,
+                UNIQUE(record_id, attempt_number)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS download_record_files (
+                id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL REFERENCES download_records(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                expected_size INTEGER NOT NULL DEFAULT 0,
+                expected_sha256 TEXT,
+                transfer_status TEXT NOT NULL,
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                local_status TEXT NOT NULL DEFAULT 'unknown',
+                observed_size INTEGER,
+                observed_mtime_ns INTEGER,
+                observed_sha256 TEXT,
+                last_reconciled_at TEXT,
+                error TEXT,
+                UNIQUE(record_id, path)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_download_records_transfer ON download_records(transfer_status)",
+            "CREATE INDEX IF NOT EXISTS idx_download_records_availability ON download_records(local_availability)",
+            "CREATE INDEX IF NOT EXISTS idx_download_attempts_record ON download_attempts(record_id, attempt_number)",
+            "CREATE INDEX IF NOT EXISTS idx_download_record_files_record ON download_record_files(record_id, local_status)",
+        )
+        for statement in statements:
+            conn.execute(statement)
+
+        task_rows = conn.execute("SELECT * FROM tasks").fetchall()
+        for task in task_rows:
+            transfer_status = "failed" if task["status"] == "partial" else task["status"]
+            completed_at = task["updated_at"] if transfer_status in TERMINAL_TRANSFER_STATUSES else None
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO download_records(
+                    id, provider, repo_type, remote_id, requested_revision, resolved_revision,
+                    destination, transfer_status, local_availability, total_bytes,
+                    downloaded_bytes, speed_bps, eta_seconds, requires_token, error,
+                    created_at, updated_at, completed_at
+                ) VALUES (?, 'huggingface', 'model', ?, ?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task["id"], task["repo_id"], task["requested_revision"], task["commit_hash"],
+                    task["destination"], transfer_status, task["total_bytes"], task["downloaded_bytes"],
+                    task["speed_bps"], task["eta_seconds"], task["requires_token"], task["error"],
+                    task["created_at"], task["updated_at"], completed_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO download_attempts(
+                    id, record_id, attempt_number, status, started_at, completed_at,
+                    total_bytes, downloaded_bytes, average_speed_bps, peak_speed_bps, error
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"{task['id']}:1", task["id"], transfer_status, task["created_at"], completed_at,
+                    task["total_bytes"], task["downloaded_bytes"], task["speed_bps"],
+                    task["speed_bps"], task["error"],
+                ),
+            )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO download_record_files(
+                id, record_id, path, expected_size, transfer_status, downloaded_bytes, error
+            )
+            SELECT id, task_id, path, size, status, downloaded_bytes, error FROM task_files
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_version(id, version) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET version=excluded.version",
+            (SCHEMA_VERSION,),
+        )
 
     def recover_interrupted(self) -> None:
         now = utc_now()
@@ -97,8 +263,23 @@ class Database:
                     "UPDATE task_files SET status=? WHERE task_id=? AND status IN ('downloading', 'queued')",
                     ("paused", row["id"]),
                 )
+                conn.execute(
+                    "UPDATE download_records SET transfer_status=?, updated_at=? WHERE id=?",
+                    (status, now, row["id"]),
+                )
+                conn.execute(
+                    "UPDATE download_record_files SET transfer_status='paused' "
+                    "WHERE record_id=? AND transfer_status IN ('downloading', 'queued')",
+                    (row["id"],),
+                )
+                conn.execute(
+                    "UPDATE download_attempts SET status=? WHERE id=("
+                    "SELECT id FROM download_attempts WHERE record_id=? ORDER BY attempt_number DESC LIMIT 1)",
+                    (status, row["id"]),
+                )
 
     def create_task(self, task: dict[str, Any], files: Iterable[dict[str, Any]]) -> None:
+        file_rows = list(files)
         with self._write_lock, self.connect() as conn:
             conn.execute(
                 """
@@ -117,26 +298,159 @@ class Database:
                 INSERT INTO task_files(id, task_id, path, size, status, downloaded_bytes, error)
                 VALUES (:id, :task_id, :path, :size, :status, 0, NULL)
                 """,
-                files,
+                file_rows,
+            )
+            conn.execute(
+                """
+                INSERT INTO download_records(
+                    id, provider, repo_type, remote_id, requested_revision, resolved_revision,
+                    destination, transfer_status, local_availability, total_bytes,
+                    downloaded_bytes, requires_token, error, created_at, updated_at
+                ) VALUES (
+                    :id, :provider, :repo_type, :repo_id, :requested_revision, :commit_hash,
+                    :destination, :status, 'unknown', :total_bytes, 0, :requires_token,
+                    NULL, :created_at, :updated_at
+                )
+                """,
+                {"provider": "huggingface", "repo_type": "model", **task},
+            )
+            conn.execute(
+                """
+                INSERT INTO download_attempts(
+                    id, record_id, attempt_number, status, started_at, total_bytes
+                ) VALUES (?, ?, 1, ?, ?, ?)
+                """,
+                (f"{task['id']}:1", task["id"], task["status"], task["created_at"], task["total_bytes"]),
+            )
+            conn.executemany(
+                """
+                INSERT INTO download_record_files(
+                    id, record_id, path, expected_size, transfer_status, downloaded_bytes, error
+                ) VALUES (:id, :task_id, :path, :size, :status, 0, NULL)
+                """,
+                file_rows,
             )
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            task_rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            task_rows = conn.execute("SELECT * FROM download_records ORDER BY created_at DESC").fetchall()
             return [self._task_with_files(conn, row) for row in task_rows]
+
+    def list_library_items(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            records = conn.execute(
+                "SELECT * FROM download_records ORDER BY updated_at DESC, created_at DESC"
+            ).fetchall()
+            groups: dict[tuple[str, str, str, str, str], list[sqlite3.Row]] = {}
+            for record in records:
+                key = (
+                    record["provider"],
+                    record["repo_type"],
+                    record["remote_id"],
+                    record["resolved_revision"],
+                    record["destination"],
+                )
+                groups.setdefault(key, []).append(record)
+
+            items: list[dict[str, Any]] = []
+            local_priority = {"available": 4, "changed": 3, "unknown": 2, "moved": 1}
+            for identity, group_records in groups.items():
+                files_by_path: dict[str, dict[str, Any]] = {}
+                for record in group_records:
+                    file_rows = conn.execute(
+                        """
+                        SELECT * FROM download_record_files
+                        WHERE record_id=? AND (
+                            transfer_status='completed'
+                            OR local_status IN ('available', 'moved', 'changed')
+                        )
+                        ORDER BY path
+                        """,
+                        (record["id"],),
+                    ).fetchall()
+                    for row in file_rows:
+                        candidate = {
+                            "record_id": record["id"],
+                            "id": row["id"],
+                            "path": row["path"],
+                            "size": row["expected_size"],
+                            "local_status": row["local_status"],
+                            "observed_size": row["observed_size"],
+                        }
+                        current = files_by_path.get(row["path"])
+                        if current is None or local_priority.get(candidate["local_status"], 0) > local_priority.get(current["local_status"], 0):
+                            files_by_path[row["path"]] = candidate
+                if not files_by_path:
+                    continue
+
+                files = sorted(files_by_path.values(), key=lambda item: item["path"].casefold())
+                completed_record_ids = {
+                    record["id"]
+                    for record in group_records
+                    if record["transfer_status"] == "completed"
+                }
+                restore_record_ids = {
+                    file["record_id"]
+                    for file in files
+                    if file["local_status"] == "moved"
+                    and file["record_id"] in completed_record_ids
+                }
+                statuses = [file["local_status"] for file in files]
+                if "changed" in statuses:
+                    availability = "changed"
+                elif "unknown" in statuses:
+                    availability = "unknown"
+                elif all(status == "available" for status in statuses):
+                    availability = "available"
+                elif all(status == "moved" for status in statuses):
+                    availability = "moved"
+                else:
+                    availability = "partial"
+                latest = group_records[0]
+                items.append(
+                    {
+                        "key": "|".join(identity),
+                        "provider": latest["provider"],
+                        "repo_type": latest["repo_type"],
+                        "repo_id": latest["remote_id"],
+                        "requested_revision": latest["requested_revision"],
+                        "commit_hash": latest["resolved_revision"],
+                        "destination": latest["destination"],
+                        "latest_record_id": latest["id"],
+                        "latest_transfer_status": latest["transfer_status"],
+                        "local_availability": availability,
+                        "history_count": len(group_records),
+                        "total_bytes": sum(int(file["size"]) for file in files),
+                        "requires_token": any(bool(record["requires_token"]) for record in group_records),
+                        "restore_record_ids": sorted(restore_record_ids),
+                        "files": files,
+                        "updated_at": latest["updated_at"],
+                    }
+                )
+            items.sort(key=lambda item: item["updated_at"], reverse=True)
+            for item in items:
+                item.pop("updated_at", None)
+            return items
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            row = conn.execute("SELECT * FROM download_records WHERE id=?", (task_id,)).fetchone()
             return self._task_with_files(conn, row) if row else None
 
     def _task_with_files(self, conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         task = dict(row)
+        task["repo_id"] = task.pop("remote_id")
+        task["commit_hash"] = task.pop("resolved_revision")
+        task["status"] = task["transfer_status"]
         task["requires_token"] = bool(task["requires_token"])
         task["files"] = [
-            dict(item)
+            {
+                **dict(item),
+                "size": item["expected_size"],
+                "status": item["transfer_status"],
+            }
             for item in conn.execute(
-                "SELECT * FROM task_files WHERE task_id=? ORDER BY path", (task["id"],)
+                "SELECT * FROM download_record_files WHERE record_id=? ORDER BY path", (task["id"],)
             ).fetchall()
         ]
         return task
@@ -161,9 +475,14 @@ class Database:
     def get_file(self, task_id: str, path: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM task_files WHERE task_id=? AND path=?", (task_id, path)
+                "SELECT * FROM download_record_files WHERE record_id=? AND path=?", (task_id, path)
             ).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            file = dict(row)
+            file["size"] = file["expected_size"]
+            file["status"] = file["transfer_status"]
+            return file
 
     def update_task(self, task_id: str, **values: Any) -> None:
         if not values:
@@ -175,6 +494,35 @@ class Database:
                 f"UPDATE tasks SET {assignments} WHERE id=?",
                 (*values.values(), task_id),
             )
+            record_values = dict(values)
+            if "status" in record_values:
+                status = record_values.pop("status")
+                record_values["transfer_status"] = "failed" if status == "partial" else status
+                if record_values["transfer_status"] in TERMINAL_TRANSFER_STATUSES:
+                    record_values["completed_at"] = values["updated_at"]
+                else:
+                    record_values["completed_at"] = None
+            record_assignments = ", ".join(f"{key}=?" for key in record_values)
+            conn.execute(
+                f"UPDATE download_records SET {record_assignments} WHERE id=?",
+                (*record_values.values(), task_id),
+            )
+            attempt_values = {
+                ("status" if key == "status" else key): value
+                for key, value in values.items()
+                if key in {"status", "downloaded_bytes", "error"}
+            }
+            if attempt_values.get("status") == "partial":
+                attempt_values["status"] = "failed"
+            if "status" in attempt_values and attempt_values["status"] in TERMINAL_TRANSFER_STATUSES:
+                attempt_values["completed_at"] = values["updated_at"]
+            if attempt_values:
+                attempt_assignments = ", ".join(f"{key}=?" for key in attempt_values)
+                conn.execute(
+                    f"UPDATE download_attempts SET {attempt_assignments} WHERE id=("
+                    "SELECT id FROM download_attempts WHERE record_id=? ORDER BY attempt_number DESC LIMIT 1)",
+                    (*attempt_values.values(), task_id),
+                )
 
     def update_file(self, file_id: str, **values: Any) -> None:
         if not values:
@@ -185,12 +533,25 @@ class Database:
                 f"UPDATE task_files SET {assignments} WHERE id=?",
                 (*values.values(), file_id),
             )
+            record_values = dict(values)
+            if "status" in record_values:
+                record_values["transfer_status"] = record_values.pop("status")
+            record_assignments = ", ".join(f"{key}=?" for key in record_values)
+            conn.execute(
+                f"UPDATE download_record_files SET {record_assignments} WHERE id=?",
+                (*record_values.values(), file_id),
+            )
 
     def bulk_file_status(self, task_id: str, from_statuses: list[str], status: str) -> None:
         marks = ",".join("?" for _ in from_statuses)
         with self._write_lock, self.connect() as conn:
             conn.execute(
                 f"UPDATE task_files SET status=? WHERE task_id=? AND status IN ({marks})",
+                (status, task_id, *from_statuses),
+            )
+            conn.execute(
+                f"UPDATE download_record_files SET transfer_status=? "
+                f"WHERE record_id=? AND transfer_status IN ({marks})",
                 (status, task_id, *from_statuses),
             )
 
@@ -208,6 +569,15 @@ class Database:
             conn.execute(
                 "UPDATE tasks SET downloaded_bytes=?, updated_at=? WHERE id=?",
                 (downloaded, utc_now(), task_id),
+            )
+            conn.execute(
+                "UPDATE download_records SET downloaded_bytes=?, updated_at=? WHERE id=?",
+                (downloaded, utc_now(), task_id),
+            )
+            conn.execute(
+                "UPDATE download_attempts SET downloaded_bytes=? WHERE id=("
+                "SELECT id FROM download_attempts WHERE record_id=? ORDER BY attempt_number DESC LIMIT 1)",
+                (downloaded, task_id),
             )
             return downloaded, int(row["total"])
 
@@ -261,17 +631,255 @@ class Database:
                 "UPDATE tasks SET destination=? WHERE id=?",
                 (destination, task_id),
             )
+            conn.execute(
+                "UPDATE download_records SET destination=? WHERE id=?",
+                (destination, task_id),
+            )
 
     def delete_task(self, task_id: str) -> None:
         with self._write_lock, self.connect() as conn:
             conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            conn.execute("DELETE FROM download_records WHERE id=?", (task_id,))
+
+    def begin_retry_attempt(self, task_id: str) -> None:
+        now = utc_now()
+        with self._write_lock, self.connect() as conn:
+            record = conn.execute(
+                "SELECT total_bytes FROM download_records WHERE id=?", (task_id,)
+            ).fetchone()
+            if not record:
+                return
+            number = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM download_attempts WHERE record_id=?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO download_attempts(
+                    id, record_id, attempt_number, status, started_at, total_bytes
+                ) VALUES (?, ?, ?, 'queued', ?, ?)
+                """,
+                (f"{task_id}:{number}", task_id, number, now, record["total_bytes"]),
+            )
+
+    def prepare_missing_redownload(self, task_id: str) -> list[str]:
+        now = utc_now()
+        with self._write_lock, self.connect() as conn:
+            record = conn.execute(
+                """
+                SELECT id, total_bytes, transfer_status, local_availability
+                FROM download_records WHERE id=?
+                """,
+                (task_id,),
+            ).fetchone()
+            if not record:
+                raise ValueError("Download history was not found")
+            if record["transfer_status"] != "completed":
+                raise ValueError("Only completed download history can restore moved files")
+            if record["local_availability"] not in {"moved", "partial"}:
+                raise ValueError("This download has no moved files to restore")
+            missing = conn.execute(
+                """
+                SELECT id, path FROM download_record_files
+                WHERE record_id=? AND transfer_status='completed' AND local_status='moved'
+                ORDER BY path
+                """,
+                (task_id,),
+            ).fetchall()
+            if not missing:
+                raise ValueError("This download has no moved files to restore")
+
+            number = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM download_attempts WHERE record_id=?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO download_attempts(
+                    id, record_id, attempt_number, status, started_at, total_bytes
+                ) VALUES (?, ?, ?, 'queued', ?, ?)
+                """,
+                (f"{task_id}:{number}", task_id, number, now, record["total_bytes"]),
+            )
+            file_ids = [row["id"] for row in missing]
+            marks = ",".join("?" for _ in file_ids)
+            conn.execute(
+                f"UPDATE task_files SET status='queued', downloaded_bytes=0, error=NULL "
+                f"WHERE task_id=? AND id IN ({marks})",
+                (task_id, *file_ids),
+            )
+            conn.execute(
+                f"UPDATE download_record_files "
+                f"SET transfer_status='queued', downloaded_bytes=0, error=NULL "
+                f"WHERE record_id=? AND id IN ({marks})",
+                (task_id, *file_ids),
+            )
+            progress = conn.execute(
+                "SELECT COALESCE(SUM(downloaded_bytes), 0) FROM task_files WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+            conn.execute(
+                """
+                UPDATE tasks SET status='queued', downloaded_bytes=?, speed_bps=0,
+                                 eta_seconds=NULL, error=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (progress, now, task_id),
+            )
+            conn.execute(
+                """
+                UPDATE download_records
+                SET transfer_status='queued', downloaded_bytes=?, speed_bps=0,
+                    eta_seconds=NULL, error=NULL, completed_at=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (progress, now, task_id),
+            )
+            conn.execute(
+                "UPDATE download_attempts SET downloaded_bytes=? WHERE id=?",
+                (progress, f"{task_id}:{number}"),
+            )
+            return [row["path"] for row in missing]
+
+    def list_attempts(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM download_attempts WHERE record_id=? ORDER BY attempt_number",
+                    (task_id,),
+                ).fetchall()
+            ]
+
+    def replace_editable_task_files(
+        self,
+        task_id: str,
+        files: Iterable[dict[str, Any]],
+        *,
+        requires_token: bool | None,
+    ) -> None:
+        file_rows = list(files)
+        now = utc_now()
+        total = sum(int(file["size"]) for file in file_rows)
+        downloaded = sum(int(file["downloaded_bytes"]) for file in file_rows)
+        with self._write_lock, self.connect() as conn:
+            task = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task:
+                raise ValueError("Download task was not found")
+            if task["status"] not in {"queued", "paused", "auth_required"}:
+                raise ValueError("This task cannot be edited in place")
+            conn.execute("DELETE FROM task_files WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM download_record_files WHERE record_id=?", (task_id,))
+            conn.executemany(
+                """
+                INSERT INTO task_files(id, task_id, path, size, status, downloaded_bytes, error)
+                VALUES (:id, :task_id, :path, :size, :status, :downloaded_bytes, :error)
+                """,
+                file_rows,
+            )
+            conn.executemany(
+                """
+                INSERT INTO download_record_files(
+                    id, record_id, path, expected_size, transfer_status,
+                    downloaded_bytes, local_status, observed_size,
+                    observed_mtime_ns, observed_sha256, last_reconciled_at, error
+                ) VALUES (
+                    :id, :task_id, :path, :size, :status,
+                    :downloaded_bytes, :local_status, :observed_size,
+                    :observed_mtime_ns, :observed_sha256, :last_reconciled_at, :error
+                )
+                """,
+                file_rows,
+            )
+            token_sql = ", requires_token=?" if requires_token is not None else ""
+            token_values: tuple[Any, ...] = (int(requires_token),) if requires_token is not None else ()
+            conn.execute(
+                f"UPDATE tasks SET total_bytes=?, downloaded_bytes=?, updated_at=?{token_sql} WHERE id=?",
+                (total, downloaded, now, *token_values, task_id),
+            )
+            conn.execute(
+                f"UPDATE download_records SET total_bytes=?, downloaded_bytes=?, updated_at=?{token_sql} WHERE id=?",
+                (total, downloaded, now, *token_values, task_id),
+            )
+            conn.execute(
+                """
+                UPDATE download_attempts SET total_bytes=?, downloaded_bytes=?
+                WHERE id=(SELECT id FROM download_attempts WHERE record_id=?
+                          ORDER BY attempt_number DESC LIMIT 1)
+                """,
+                (total, downloaded, task_id),
+            )
+
+    def list_reconciliation_records(self, record_id: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            params: tuple[str, ...] = (record_id,) if record_id else ()
+            where = "WHERE id=?" if record_id else ""
+            records = conn.execute(
+                f"SELECT id, destination, transfer_status, local_availability FROM download_records {where}",
+                params,
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for record in records:
+                item = dict(record)
+                item["files"] = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT id, path, expected_size, expected_sha256, transfer_status,
+                               local_status, observed_size, observed_mtime_ns, observed_sha256
+                        FROM download_record_files WHERE record_id=? ORDER BY path
+                        """,
+                        (record["id"],),
+                    ).fetchall()
+                ]
+                result.append(item)
+            return result
+
+    def apply_reconciliation(
+        self,
+        record_id: str,
+        availability: str,
+        observations: Iterable[dict[str, Any]],
+        reconciled_at: str,
+    ) -> None:
+        with self._write_lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE download_records SET local_availability=?, last_reconciled_at=? WHERE id=?",
+                (availability, reconciled_at, record_id),
+            )
+            conn.executemany(
+                """
+                UPDATE download_record_files
+                SET local_status=:local_status,
+                    observed_size=:observed_size,
+                    observed_mtime_ns=:observed_mtime_ns,
+                    observed_sha256=:observed_sha256,
+                    last_reconciled_at=:last_reconciled_at
+                WHERE id=:id AND record_id=:record_id
+                """,
+                observations,
+            )
+
+    def schema_version(self) -> int:
+        with self.connect() as conn:
+            return self._schema_version(conn)
 
     def expired_completed_tasks(self, updated_before: str) -> list[str]:
         with self.connect() as conn:
             return [
                 row["id"]
                 for row in conn.execute(
-                    "SELECT id FROM tasks WHERE status='completed' AND updated_at<? ORDER BY updated_at",
+                    """
+                    SELECT tasks.id FROM tasks
+                    JOIN download_records ON download_records.id=tasks.id
+                    WHERE tasks.status='completed' AND tasks.updated_at<?
+                      AND download_records.local_availability NOT IN ('moved', 'unknown')
+                    ORDER BY tasks.updated_at
+                    """,
                     (updated_before,),
                 ).fetchall()
             ]

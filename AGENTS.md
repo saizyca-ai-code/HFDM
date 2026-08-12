@@ -5,6 +5,7 @@
 - Use Obsidian to maintain the durable development record for this repository. Do not rely on the chat transcript as the only record of plans, investigations, decisions, execution, or verification.
 - The Obsidian vault is `dev_keeps` at `I:\_ObsidianBase\dev_keeps`. Obsidian must be running before using its CLI.
 - Always target the vault explicitly as the first CLI parameter, for example: `obsidian vault=dev_keeps read path="_Habits/Attribute Items.md"`. Do not rely on whichever vault is currently focused.
+- Use the Obsidian CLI for reads, searches, and other read-only vault operations. Because CLI writes are unreliable in this environment, create and update notes by writing the correctly formatted files directly under `I:\_ObsidianBase\dev_keeps`; treat this repository rule as overriding any skill guidance that requires CLI-based writes.
 - Before creating or updating records, read:
   - `_Habits/Collaboration settings.md`
   - `_Habits/Attribute Items.md`

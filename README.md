@@ -162,6 +162,20 @@ Both directories are runtime state and are ignored by Git. Task destinations are
 stored relative to `download/`, so copying `data/` and `download/` together keeps
 completed files usable at the new location.
 
+## V1 database migration and rollback
+
+The first V2 startup detects a V1 `data/hfdm.sqlite3`, creates the standalone backup
+`data/hfdm.sqlite3.v1.bak`, and then performs the schema migration in one SQLite
+transaction. Migration adds the V2 history, attempt, expected-file, and local
+availability catalog without deleting the V1 operational tables or changing any
+file under `download/`. If migration fails, the transaction is rolled back and the
+service refuses to continue initialization.
+
+To return to V1, stop HFDM completely, preserve the V2 database under a different
+name for diagnosis, and copy `hfdm.sqlite3.v1.bak` back to `hfdm.sqlite3` before
+starting the V1 application. Do not restore while the service is running. The
+backup is never overwritten by later V2 startups.
+
 ## Security boundary
 
 V1 is for a trusted LAN and does not provide login or HTTPS. A user-supplied HF token crosses the LAN over plain HTTP, is kept only in process memory, and is discarded after completion or cancellation. If the service restarts, authenticated unfinished tasks enter `auth_required` and need a token again.

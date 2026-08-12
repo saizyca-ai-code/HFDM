@@ -32,7 +32,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type RepoResolution } from "@/lib/api"
+import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
 import { cn, formatBytes, formatEta, percent } from "@/lib/utils"
 
 type Page = "new" | "transfers" | "library" | "settings"
@@ -50,15 +50,26 @@ const statusMeta: Record<string, { label: string; className: string }> = {
   cancelled: { label: "已取消", className: "border-slate-400/20 bg-slate-400/10 text-slate-400" },
 }
 
+const availabilityMeta: Record<string, { label: string; className: string }> = {
+  available: { label: "Available", className: "border-emerald-400/20 bg-emerald-400/10 text-emerald-300" },
+  partial: { label: "Partial", className: "border-orange-400/20 bg-orange-400/10 text-orange-300" },
+  moved: { label: "Moved", className: "border-slate-400/20 bg-slate-400/10 text-slate-300" },
+  changed: { label: "Changed", className: "border-rose-400/20 bg-rose-400/10 text-rose-300" },
+  unknown: { label: "Unknown", className: "border-violet-400/20 bg-violet-400/10 text-violet-300" },
+}
+
 function App() {
   const [page, setPage] = useState<Page>("new")
   const [tasks, setTasks] = useState<DownloadTask[]>([])
+  const [library, setLibrary] = useState<LibraryItem[]>([])
   const [isAdmin, setIsAdmin] = useState(false)
   const [online, setOnline] = useState(false)
 
   const refreshTasks = useCallback(async () => {
     try {
-      setTasks(await api.tasks())
+      const [nextTasks, nextLibrary] = await Promise.all([api.tasks(), api.library()])
+      setTasks(nextTasks)
+      setLibrary(nextLibrary)
       setOnline(true)
     } catch {
       setOnline(false)
@@ -129,7 +140,7 @@ function App() {
         <div className="mx-auto max-w-7xl px-4 py-7 md:px-8 md:py-10">
           {page === "new" && <NewDownload onCreated={() => { void refreshTasks(); setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
-          {page === "library" && <LibraryPage tasks={tasks} />}
+          {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
         </div>
       </main>
@@ -226,7 +237,13 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
   const [token, setToken] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [inspection, setInspection] = useState<TaskInspection | null>(null)
+  const [editToken, setEditToken] = useState("")
+  const [editSelected, setEditSelected] = useState<Set<string>>(new Set())
+  const [editMessage, setEditMessage] = useState("")
   const meta = statusMeta[task.status] ?? { label: task.status, className: "" }
+  const availability = availabilityMeta[task.local_availability] ?? availabilityMeta.unknown
   const progress = percent(task.downloaded_bytes, task.total_bytes)
   const command = async (action: "pause" | "resume" | "retry" | "cancel") => {
     setBusy(true); setError("")
@@ -234,32 +251,73 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
     catch (reason) { setError(reason instanceof Error ? reason.message : "操作失敗") }
     finally { setBusy(false) }
   }
-  const remove = async () => {
-    if (!window.confirm("要移除此任務及未被其他任務引用的下載檔案嗎？")) return
+  const removeHistory = async () => {
+    if (!window.confirm("只刪除這筆下載歷史嗎？實體檔案不會被刪除。")) return
     setBusy(true); setError("")
-    try { await api.deleteTask(task.id, true); await refresh() }
+    try { await api.deleteTask(task.id, false); await refresh() }
     catch (reason) { setError(reason instanceof Error ? reason.message : "刪除失敗") }
+    finally { setBusy(false) }
+  }
+  const removeFiles = async () => {
+    if (!window.confirm("只刪除 HFDM download/ 內的實體檔案嗎？下載歷史會保留並顯示為 Moved。")) return
+    setBusy(true); setError("")
+    try { await api.deleteTaskFiles(task.id); await refresh() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "刪除檔案失敗") }
+    finally { setBusy(false) }
+  }
+  const inspectRepo = async () => {
+    setBusy(true); setError(""); setEditMessage("")
+    try {
+      const result = await api.inspectTask(task.id, editToken)
+      setInspection(result)
+      const available = new Set(result.resolution.files.map((file) => file.path))
+      setEditSelected(new Set(result.selected_files.filter((path) => available.has(path))))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Repo 檢查失敗") }
+    finally { setBusy(false) }
+  }
+  const openEditor = () => {
+    setEditing(true); setInspection(null); setEditSelected(new Set()); setEditMessage(""); setError("")
+    if (!task.requires_token) window.setTimeout(() => void inspectRepo(), 0)
+  }
+  const saveConfiguration = async () => {
+    if (!inspection || !editSelected.size) return
+    setBusy(true); setError(""); setEditMessage("")
+    try {
+      const result = await api.updateTaskConfiguration(task.id, [...editSelected], editToken)
+      setEditToken("")
+      setEditMessage(result.created_new ? "已建立更新任務並取代原任務；實體檔案不受影響。" : "任務設定已更新。")
+      setEditing(false)
+      await refresh()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "更新任務失敗") }
     finally { setBusy(false) }
   }
   return <Card className="overflow-hidden">
     <div className="p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-center">
         <div className="grid size-11 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-[#0a1016]"><Box className="size-5 text-cyan-400/75" /></div>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.repo_id}</h3><Badge className={meta.className}>{meta.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.repo_id}</h3><Badge className={meta.className}>Transfer: {meta.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.provider} / {task.repo_type}</span><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
         {isAdmin && <div className="flex items-center gap-1.5">
+          <Button variant="secondary" size="sm" disabled={busy} onClick={openEditor}><SettingsIcon className="size-3.5" />編輯</Button>
           {["queued", "downloading"].includes(task.status) && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void command("pause")}><Pause className="size-3.5" />暫停</Button>}
           {["paused", "auth_required"].includes(task.status) && <Button size="sm" disabled={busy} onClick={() => void command("resume")}><Play className="size-3.5" />繼續</Button>}
           {["failed", "partial"].includes(task.status) && <Button size="sm" disabled={busy} onClick={() => void command("retry")}><RotateCcw className="size-3.5" />重試</Button>}
           {!task.status.match(/completed|cancelled/) && <Button variant="ghost" size="icon" disabled={busy} onClick={() => void command("cancel")} aria-label="取消"><Square className="size-3.5" /></Button>}
-          {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="destructive" size="icon" disabled={busy} onClick={() => void remove()} aria-label="刪除"><Trash2 className="size-3.5" /></Button>}
+          {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="ghost" size="icon" disabled={busy || task.local_availability === "moved" || task.local_availability === "unknown"} onClick={() => void removeFiles()} aria-label="只刪除實體檔案" title="只刪除實體檔案"><HardDrive className="size-3.5" /></Button>}
+          {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="destructive" size="icon" disabled={busy} onClick={() => void removeHistory()} aria-label="只刪除歷史" title="只刪除歷史"><Trash2 className="size-3.5" /></Button>}
         </div>}
       </div>
       {task.status === "auth_required" && isAdmin && <div className="mt-4 flex gap-2"><Input type="password" autoComplete="off" className="h-9" placeholder="重新提供 HF Token" value={token} onChange={(event) => setToken(event.target.value)} /><Button size="sm" onClick={() => void command("resume")} disabled={!token || busy}>驗證並繼續</Button></div>}
       <div className="mt-5"><div className="mb-2 flex flex-wrap justify-between gap-2 text-xs"><span className="text-slate-500">{formatBytes(task.downloaded_bytes)} / {formatBytes(task.total_bytes)}</span><span className="flex gap-3 font-mono text-slate-500"><span>{task.status === "downloading" ? `${formatBytes(task.speed_bps)}/s` : "— B/s"}</span><span>ETA {task.status === "downloading" ? formatEta(task.eta_seconds) : "—"}</span><span className="text-slate-300">{progress}%</span></span></div><Progress value={progress} /></div>
       {(error || task.error) && <div className="mt-3 text-xs text-rose-300">{error || task.error}</div>}
+      {editMessage && <div className="mt-3 text-xs text-emerald-300">{editMessage}</div>}
+      {editing && <div className="mt-4 space-y-4 rounded-xl border border-cyan-400/15 bg-cyan-400/[.035] p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="text-sm font-semibold text-slate-200">編輯下載任務</div><div className="mt-1 text-xs text-slate-500">重新解析 {task.repo_id} / {task.requested_revision}，檢查遠端 commit 與完整檔案樹。</div></div><Button variant="ghost" size="sm" onClick={() => { setEditing(false); setEditToken("") }}>關閉</Button></div>
+        <div className="flex flex-col gap-2 sm:flex-row"><div className="relative min-w-0 flex-1"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={editToken} onChange={(event) => setEditToken(event.target.value)} placeholder={task.requires_token ? "輸入 HF Token 後重新檢查" : "HF Token（選填，只存於記憶體）"} /></div><Button variant="secondary" onClick={() => void inspectRepo()} disabled={busy || (task.requires_token && !editToken)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}檢查 Repo</Button></div>
+        {inspection && <><div className="flex flex-wrap items-center gap-2 text-xs"><Badge>{inspection.resolution.requested_revision}</Badge><span className="font-mono text-slate-500">目前 {task.commit_hash.slice(0, 12)}</span><span className="text-slate-600">→</span><span className="font-mono text-slate-300">遠端 {inspection.resolution.commit_hash.slice(0, 12)}</span>{inspection.update_available ? <Badge className="border-amber-400/20 bg-amber-400/10 text-amber-300">Repo 有更新</Badge> : <Badge className="border-emerald-400/20 bg-emerald-400/10 text-emerald-300">已是最新 commit</Badge>}</div>{inspection.unavailable_selected_files.length > 0 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.06] p-3 text-xs text-amber-200">原任務有 {inspection.unavailable_selected_files.length} 個檔案已不在目前 repo：{inspection.unavailable_selected_files.join(", ")}</div>}<FileTree files={inspection.resolution.files} selected={editSelected} onChange={setEditSelected} /><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="text-xs text-slate-500">已選 {editSelected.size} / {inspection.resolution.files.length} 個檔案。{["downloading", "pausing"].includes(task.status) ? "請先暫停目前下載，再修改設定。" : inspection.can_update_in_place ? "將更新目前任務。" : "儲存時會建立新任務並取代原任務；舊實體檔案不會刪除。"}</div><Button onClick={() => void saveConfiguration()} disabled={busy || !editSelected.size || ["downloading", "pausing"].includes(task.status)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{["downloading", "pausing"].includes(task.status) ? "請先暫停" : inspection.can_update_in_place ? "儲存設定" : "建立更新任務"}</Button></div></>}
+      </div>}
       <button onClick={() => setExpanded(!expanded)} className="mt-4 flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"><ChevronDown className={cn("size-3.5 transition-transform", expanded && "rotate-180")} />{expanded ? "收合檔案" : "查看檔案"}</button>
     </div>
-    {expanded && <div className="max-h-72 overflow-auto border-t border-white/[.06] bg-[#0a1016]/70">{task.files.map((file) => <div key={file.id} className="flex items-center gap-3 border-b border-white/[.035] px-5 py-2.5 text-xs"><FileStatus status={file.status} /><span className="min-w-0 flex-1 truncate text-slate-400">{file.path}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.status === "completed" && <a className="text-cyan-400 hover:text-cyan-300" href={fileDownloadUrl(task.id, file.path)}><FileDown className="size-4" /></a>}</div>)}</div>}
+    {expanded && <div className="max-h-72 overflow-auto border-t border-white/[.06] bg-[#0a1016]/70">{task.files.map((file) => <div key={file.id} className="flex items-center gap-3 border-b border-white/[.035] px-5 py-2.5 text-xs"><FileStatus status={file.status} /><span className="min-w-0 flex-1 truncate text-slate-400">{file.path}</span><Badge className={availabilityMeta[file.local_status]?.className}>{availabilityMeta[file.local_status]?.label ?? file.local_status}</Badge><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.status === "completed" && file.local_status === "available" && <a className="text-cyan-400 hover:text-cyan-300" href={fileDownloadUrl(task.id, file.path)}><FileDown className="size-4" /></a>}</div>)}</div>}
   </Card>
 }
 
@@ -271,10 +329,36 @@ function FileStatus({ status }: { status: string }) {
   return <span className="size-2 shrink-0 rounded-full bg-slate-700" />
 }
 
-function LibraryPage({ tasks }: { tasks: DownloadTask[] }) {
-  const completed = tasks.filter((task) => task.files.some((file) => file.status === "completed"))
-  return <><PageHeading eyebrow="Shared library" title="LAN 模型庫" description="所有完成檔案都可以逐檔下載；瀏覽器會利用 HTTP Range 處理大型檔案續傳。" />
-    <div className="grid gap-4 md:grid-cols-2">{completed.length ? completed.map((task) => <Card key={task.id}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{task.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{task.commit_hash.slice(0, 12)}</div></div><Badge className="border-emerald-400/20 bg-emerald-400/10 text-emerald-300">{task.files.filter((file) => file.status === "completed").length} files</Badge></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{task.files.filter((file) => file.status === "completed").map((file) => <a key={file.id} href={fileDownloadUrl(task.id, file.path)} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400 hover:bg-white/[.04] hover:text-cyan-300"><FileDown className="size-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span></a>)}</div></CardContent></Card>) : <div className="md:col-span-2"><EmptyState icon={Library} title="模型庫還是空的" text="任務完成的檔案會自動出現在這裡。" /></div>}</div>
+function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmin: boolean; refresh: () => Promise<void> }) {
+  const [scanning, setScanning] = useState(false)
+  const [restoringId, setRestoringId] = useState<string | null>(null)
+  const [error, setError] = useState("")
+  const rescan = async () => {
+    setScanning(true)
+    try { await api.reconcileHistory(); await refresh() }
+    finally { setScanning(false) }
+  }
+  const restore = async (item: LibraryItem) => {
+    let token = ""
+    if (item.requires_token) {
+      token = window.prompt("此下載需要 Hugging Face Token。Token 只會保留在記憶體中。") ?? ""
+      if (!token) return
+    }
+    setRestoringId(item.key); setError("")
+    try {
+      for (const recordId of item.restore_record_ids) await api.redownloadMissing(recordId, token)
+      await refresh()
+    }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "重新下載失敗") }
+    finally { setRestoringId(null) }
+  }
+  return <><PageHeading eyebrow="Model library" title="模型庫與本機狀態" description="同一來源、commit 與下載位置只顯示一次；每次傳輸仍完整保留在傳輸任務中。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
+    {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
+    <div className="grid gap-4 md:grid-cols-2">{items.length ? items.map((item) => {
+      const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
+      const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
+      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{item.provider} / {item.repo_type} / {item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+    }) : <div className="md:col-span-2"><EmptyState icon={Library} title="模型庫還是空的" text="至少完成一個檔案後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }
 

@@ -10,6 +10,21 @@ from .schemas import RepoFileInfo, RepoResolution
 class HuggingFaceService:
     def resolve(self, source: str, token: str | None = None) -> RepoResolution:
         ref: RepoReference = parse_repo_reference(source)
+        return self._resolve_reference(ref, token)
+
+    def resolve_existing(
+        self,
+        repo_id: str,
+        requested_revision: str,
+        token: str | None = None,
+    ) -> RepoResolution:
+        return self._resolve_reference(
+            RepoReference(repo_id=repo_id, revision=requested_revision, repo_type="model"),
+            token,
+        )
+
+    @staticmethod
+    def _resolve_reference(ref: RepoReference, token: str | None) -> RepoResolution:
         api = HfApi(token=token or False, library_name="hfdm")
         info = api.model_info(ref.repo_id, revision=ref.revision, token=token or False)
         commit_hash = info.sha

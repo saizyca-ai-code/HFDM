@@ -17,10 +17,16 @@ from .schemas import (
     AppSettingsView,
     CreateTaskRequest,
     IdentityView,
+    InspectTaskRequest,
+    LibraryItemView,
     RepoResolution,
     RepoResolveRequest,
+    RedownloadTaskRequest,
     ResumeTaskRequest,
+    TaskConfigurationResult,
+    TaskInspection,
     TaskView,
+    UpdateTaskConfigurationRequest,
 )
 
 
@@ -88,12 +94,97 @@ def create_router(
     def list_tasks() -> list[dict]:
         return db.list_tasks()
 
+    @router.get("/library", response_model=list[LibraryItemView])
+    def list_library() -> list[dict]:
+        return db.list_library_items()
+
     @router.get("/tasks/{task_id}", response_model=TaskView)
     def get_task(task_id: str) -> dict:
         task = db.get_task(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="找不到下載任務")
         return task
+
+    @router.post(
+        "/tasks/{task_id}/inspect",
+        response_model=TaskInspection,
+        dependencies=[Depends(require_admin)],
+    )
+    def inspect_task(task_id: str, payload: InspectTaskRequest) -> dict:
+        task = db.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="找不到下載任務")
+        try:
+            resolution = hf.resolve_existing(
+                task["repo_id"],
+                task["requested_revision"],
+                token_value(payload.hf_token),
+            )
+        except HfHubHTTPError as exc:
+            raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"重新檢查 Hugging Face repo 失敗：{exc}") from exc
+        update_available = resolution.commit_hash != task["commit_hash"]
+        available_paths = {file.path for file in resolution.files}
+        selected_files = [file["path"] for file in task["files"]]
+        return {
+            "resolution": resolution,
+            "selected_files": selected_files,
+            "unavailable_selected_files": [
+                path for path in selected_files if path not in available_paths
+            ],
+            "update_available": update_available,
+            "can_update_in_place": (
+                not update_available
+                and task["status"] in {"queued", "paused", "auth_required"}
+            ),
+        }
+
+    @router.put(
+        "/tasks/{task_id}/configuration",
+        response_model=TaskConfigurationResult,
+        dependencies=[Depends(require_admin)],
+    )
+    def update_task_configuration(
+        task_id: str,
+        payload: UpdateTaskConfigurationRequest,
+    ) -> dict:
+        task = db.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="找不到下載任務")
+        try:
+            token = token_value(payload.hf_token)
+            resolution = hf.resolve_existing(
+                task["repo_id"],
+                task["requested_revision"],
+                token,
+            )
+            update_available = resolution.commit_hash != task["commit_hash"]
+            configured, created_new = manager.reconfigure_task(
+                task_id,
+                resolution,
+                payload.selected_files,
+                token,
+            )
+            return {
+                "task": configured,
+                "created_new": created_new,
+                "update_available": update_available,
+            }
+        except DownloadManagerError as exc:
+            raise command_error(exc) from exc
+        except HfHubHTTPError as exc:
+            raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"更新下載任務失敗：{exc}") from exc
+
+    @router.post("/history/reconcile", dependencies=[Depends(require_admin)])
+    def reconcile_history() -> dict[str, int]:
+        return {"updated": manager.reconcile()}
 
     def command_error(exc: DownloadManagerError) -> HTTPException:
         return HTTPException(status_code=409, detail=str(exc))
@@ -119,6 +210,17 @@ def create_router(
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
 
+    @router.post(
+        "/tasks/{task_id}/redownload-missing",
+        response_model=TaskView,
+        dependencies=[Depends(require_admin)],
+    )
+    def redownload_missing(task_id: str, payload: RedownloadTaskRequest) -> dict:
+        try:
+            return manager.redownload_missing(task_id, token_value(payload.hf_token))
+        except DownloadManagerError as exc:
+            raise command_error(exc) from exc
+
     @router.post("/tasks/{task_id}/cancel", response_model=TaskView, dependencies=[Depends(require_admin)])
     def cancel_task(task_id: str) -> dict:
         try:
@@ -127,9 +229,20 @@ def create_router(
             raise command_error(exc) from exc
 
     @router.delete("/tasks/{task_id}", status_code=204, dependencies=[Depends(require_admin)])
-    def delete_task(task_id: str, delete_files: bool = True) -> None:
+    def delete_task(task_id: str, delete_files: bool = False) -> None:
         try:
             manager.delete(task_id, delete_files=delete_files)
+        except DownloadManagerError as exc:
+            raise command_error(exc) from exc
+
+    @router.delete(
+        "/tasks/{task_id}/files",
+        response_model=TaskView,
+        dependencies=[Depends(require_admin)],
+    )
+    def delete_task_files(task_id: str) -> dict:
+        try:
+            return manager.delete_files(task_id)
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
 
@@ -150,7 +263,12 @@ def create_router(
     def download_file(task_id: str, file_path: str, request: Request) -> StreamingResponse:
         task = db.get_task(task_id)
         file = db.get_file(task_id, file_path)
-        if not task or not file or file["status"] != "completed":
+        if (
+            not task
+            or not file
+            or file["status"] != "completed"
+            or file["local_status"] != "available"
+        ):
             raise HTTPException(status_code=404, detail="檔案尚未完成或不存在")
         root = manager.task_destination(task)
         target = (root / Path(file_path)).resolve()
