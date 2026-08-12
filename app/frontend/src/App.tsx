@@ -110,7 +110,7 @@ function App() {
         <nav className="space-y-1">
           <NavButton active={page === "new"} icon={Plus} label="新增下載" onClick={() => setPage("new")} />
           <NavButton active={page === "transfers"} icon={Activity} label="傳輸任務" count={activeCount} onClick={() => setPage("transfers")} />
-          <NavButton active={page === "library"} icon={Library} label="模型庫" onClick={() => setPage("library")} />
+          <NavButton active={page === "library"} icon={Library} label="內容庫" onClick={() => setPage("library")} />
           <NavButton active={page === "settings"} icon={SettingsIcon} label="服務設定" onClick={() => setPage("settings")} />
         </nav>
         <div className="mt-auto rounded-xl border border-white/[.06] bg-white/[.025] p-3.5">
@@ -148,7 +148,7 @@ function App() {
       <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-4 rounded-2xl border border-white/10 bg-[#0c1219]/95 p-1.5 shadow-2xl backdrop-blur-xl lg:hidden">
         <MobileNav active={page === "new"} icon={Plus} label="新增" onClick={() => setPage("new")} />
         <MobileNav active={page === "transfers"} icon={Activity} label="任務" onClick={() => setPage("transfers")} />
-        <MobileNav active={page === "library"} icon={Library} label="模型" onClick={() => setPage("library")} />
+        <MobileNav active={page === "library"} icon={Library} label="內容" onClick={() => setPage("library")} />
         <MobileNav active={page === "settings"} icon={SettingsIcon} label="設定" onClick={() => setPage("settings")} />
       </nav>
     </div>
@@ -170,6 +170,8 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
 function NewDownload({ onCreated }: { onCreated: () => void }) {
   const [source, setSource] = useState("https://huggingface.co/Comfy-Org/z_image_turbo/tree/main")
   const [token, setToken] = useState("")
+  const [includeGlobs, setIncludeGlobs] = useState("")
+  const [excludeGlobs, setExcludeGlobs] = useState("")
   const [repo, setRepo] = useState<RepoResolution | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -179,9 +181,14 @@ function NewDownload({ onCreated }: { onCreated: () => void }) {
   const resolve = async () => {
     setBusy(true); setError("")
     try {
-      const result = await api.resolveRepo(source, token)
+      const result = await api.resolveRepo(
+        source,
+        token,
+        splitGlobInput(includeGlobs),
+        splitGlobInput(excludeGlobs),
+      )
       setRepo(result)
-      setSelected(new Set(result.files.map((file) => file.path)))
+      setSelected(new Set(result.suggested_files))
     } catch (reason) { setError(reason instanceof Error ? reason.message : "讀取 repo 失敗") }
     finally { setBusy(false) }
   }
@@ -197,18 +204,21 @@ function NewDownload({ onCreated }: { onCreated: () => void }) {
   }
 
   return <>
-    <PageHeading eyebrow="New transfer" title="從 Hugging Face 取得模型" description="貼上 Model ID 或網址，選擇需要的檔案。Token 只在此任務的記憶體中使用，不會保存到伺服器。" />
+    <PageHeading eyebrow="New transfer" title="從 Hugging Face 取得內容" description="貼上 Model 或 Dataset ID／網址，選擇需要的檔案。Token 只在此任務的記憶體中使用，不會保存到伺服器。" />
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
       <Card>
-        <CardHeader><h2 className="font-semibold text-white">Repo 來源</h2><p className="text-xs text-slate-500">支援 owner/repo、模型首頁與 /tree/&lt;revision&gt;</p></CardHeader>
+        <CardHeader><h2 className="font-semibold text-white">Repo 來源</h2><p className="text-xs text-slate-500">支援 owner/repo、datasets/owner/repo、Model／Dataset 網址與 /tree/&lt;revision&gt;</p></CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => setSource(event.target.value)} placeholder="Comfy-Org/z_image_turbo" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button></div>
           <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="HF Token（選填；不儲存）" /></div>
+          <div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => setIncludeGlobs(event.target.value)} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => setExcludeGlobs(event.target.value)} placeholder="Exclude glob，例如 data/test/**" /></div>
+          <div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div>
           {error && <div className="flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
           {repo && <div className="space-y-4 pt-2">
-            <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.repo_id}</Badge><Badge>{repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
+            <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.repo_id}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
+            {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
             <FileTree files={repo.files} selected={selected} onChange={setSelected} />
-            <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於服務端共用模型庫</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
+            <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
           </div>}
         </CardContent>
       </Card>
@@ -219,6 +229,10 @@ function NewDownload({ onCreated }: { onCreated: () => void }) {
       </div>
     </div>
   </>
+}
+
+function splitGlobInput(value: string): string[] {
+  return value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)
 }
 
 function MetricCard({ icon: Icon, label, value, note }: { icon: typeof Archive; label: string; value: string; note: string }) {
@@ -352,13 +366,13 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     catch (reason) { setError(reason instanceof Error ? reason.message : "重新下載失敗") }
     finally { setRestoringId(null) }
   }
-  return <><PageHeading eyebrow="Model library" title="模型庫與本機狀態" description="同一來源、commit 與下載位置只顯示一次；每次傳輸仍完整保留在傳輸任務中。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
+  return <><PageHeading eyebrow="Content library" title="Model／Dataset 與本機狀態" description="Model 與 Dataset identity 分開；同一來源、commit 與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
     <div className="grid gap-4 md:grid-cols-2">{items.length ? items.map((item) => {
       const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
       const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
       return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{item.provider} / {item.repo_type} / {item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
-    }) : <div className="md:col-span-2"><EmptyState icon={Library} title="模型庫還是空的" text="至少完成一個檔案後，實體內容會聚合顯示在這裡。" /></div>}</div>
+    }) : <div className="md:col-span-2"><EmptyState icon={Library} title="內容庫還是空的" text="至少完成一個 Model 或 Dataset 檔案後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }
 
@@ -380,7 +394,7 @@ function SettingsPage({ isAdmin }: { isAdmin: boolean }) {
       <SettingField label="容量上限（GiB）" note="0 代表不限容量"><Input type="number" min={0} value={Math.round(settings.max_storage_bytes / 1024 ** 3)} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, max_storage_bytes: Number(e.target.value) * 1024 ** 3 })} /></SettingField>
       <SettingField label="磁碟安全保留（GiB）" note="低於此空間時拒絕新任務"><Input type="number" min={0} value={Math.round(settings.min_free_bytes / 1024 ** 3)} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, min_free_bytes: Number(e.target.value) * 1024 ** 3 })} /></SettingField>
       <SettingField label="保留天數" note="0 代表不自動過期；自動清理將於後續版本啟用"><Input type="number" min={0} value={settings.retention_days} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, retention_days: Number(e.target.value) })} /></SettingField>
-      <SettingField label="允許刪除實體檔案" note="關閉後只能保留共用模型內容"><button type="button" disabled={!isAdmin} onClick={() => setSettings({ ...settings, allow_delete_files: !settings.allow_delete_files })} className={cn("relative h-7 w-12 rounded-full border transition", settings.allow_delete_files ? "border-cyan-400/40 bg-cyan-400/25" : "border-white/10 bg-white/[.04]")}><span className={cn("absolute top-1 size-4 rounded-full bg-white transition-all", settings.allow_delete_files ? "left-7" : "left-1")} /></button></SettingField>
+      <SettingField label="允許刪除實體檔案" note="關閉後只能保留共用 Model／Dataset 內容"><button type="button" disabled={!isAdmin} onClick={() => setSettings({ ...settings, allow_delete_files: !settings.allow_delete_files })} className={cn("relative h-7 w-12 rounded-full border transition", settings.allow_delete_files ? "border-cyan-400/40 bg-cyan-400/25" : "border-white/10 bg-white/[.04]")}><span className={cn("absolute top-1 size-4 rounded-full bg-white transition-all", settings.allow_delete_files ? "left-7" : "left-1")} /></button></SettingField>
       {error && <div className="text-xs text-rose-300">{error}</div>}
       {isAdmin && <div className="flex justify-end"><Button onClick={() => void save()}>{saved ? <CheckCircle2 className="size-4" /> : <SettingsIcon className="size-4" />}{saved ? "已儲存" : "儲存設定"}</Button></div>}
     </CardContent></Card>}

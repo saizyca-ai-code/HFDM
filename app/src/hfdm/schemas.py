@@ -20,11 +20,14 @@ TaskStatus = Literal[
 ]
 
 LocalAvailability = Literal["available", "partial", "moved", "changed", "unknown"]
+RepoType = Literal["model", "dataset"]
 
 
 class RepoResolveRequest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
     hf_token: SecretStr | None = None
+    include_globs: list[str] = Field(default_factory=list, max_length=32)
+    exclude_globs: list[str] = Field(default_factory=list, max_length=32)
 
 
 class RepoFileInfo(BaseModel):
@@ -35,11 +38,12 @@ class RepoFileInfo(BaseModel):
 
 class RepoResolution(BaseModel):
     repo_id: str
-    repo_type: str = "model"
+    repo_type: RepoType = "model"
     requested_revision: str
     commit_hash: str
     files: list[RepoFileInfo]
     total_bytes: int
+    suggested_files: list[str] = Field(default_factory=list)
 
 
 class CreateTaskRequest(BaseModel):
@@ -80,7 +84,7 @@ class TaskFileView(BaseModel):
 class TaskView(BaseModel):
     id: str
     provider: str = "huggingface"
-    repo_type: str = "model"
+    repo_type: RepoType = "model"
     repo_id: str
     requested_revision: str
     commit_hash: str

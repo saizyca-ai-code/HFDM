@@ -7,6 +7,7 @@ export type RepoResolution = {
   commit_hash: string
   files: RepoFile[]
   total_bytes: number
+  suggested_files: string[]
 }
 
 export type TaskFile = {
@@ -107,10 +108,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   identity: () => request<{ role: "admin" | "visitor"; is_admin: boolean }>("/api/identity"),
-  resolveRepo: (source: string, hfToken: string) =>
+  resolveRepo: (source: string, hfToken: string, includeGlobs: string[] = [], excludeGlobs: string[] = []) =>
     request<RepoResolution>("/api/repos/resolve", {
       method: "POST",
-      body: JSON.stringify({ source, hf_token: hfToken || null }),
+      body: JSON.stringify({ source, hf_token: hfToken || null, include_globs: includeGlobs, exclude_globs: excludeGlobs }),
     }),
   createTask: (source: string, selectedFiles: string[], hfToken: string) =>
     request<DownloadTask>("/api/tasks", {

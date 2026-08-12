@@ -64,7 +64,7 @@ def test_existing_task_can_inspect_repo_and_update_selection(
     monkeypatch.setattr(
         HuggingFaceService,
         "resolve_existing",
-        lambda self, repo_id, revision, token=None: resolution,
+        lambda self, repo_id, revision, token=None, repo_type="model": resolution,
     )
     client = TestClient(app, client=("127.0.0.1", 50000))
 
@@ -133,7 +133,7 @@ def test_updated_task_api_replaces_predecessor_history(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         HuggingFaceService,
         "resolve_existing",
-        lambda self, repo_id, revision, token=None: resolution,
+        lambda self, repo_id, revision, token=None, repo_type="model": resolution,
     )
     client = TestClient(app, client=("127.0.0.1", 50000))
 
@@ -148,3 +148,68 @@ def test_updated_task_api_replaces_predecessor_history(tmp_path: Path, monkeypat
     assert successor_id != "predecessor"
     assert client.get("/api/tasks/predecessor").status_code == 404
     assert [task["id"] for task in client.get("/api/tasks").json()] == [successor_id]
+
+
+def test_dataset_resolve_and_create_api_preserve_repo_type_and_globs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = AppPaths(
+        root=tmp_path,
+        data=tmp_path / "data",
+        downloads=tmp_path / "download",
+        database=tmp_path / "data" / "hfdm.sqlite3",
+        frontend_dist=tmp_path / "dist",
+    )
+    app = create_app(paths)
+    captured: list[tuple[list[str], list[str]]] = []
+    resolution = RepoResolution(
+        repo_id="owner/data",
+        repo_type="dataset",
+        requested_revision="main",
+        commit_hash="d" * 40,
+        files=[
+            RepoFileInfo(path="data/train.parquet", size=20),
+            RepoFileInfo(path="data/test.parquet", size=10),
+        ],
+        total_bytes=30,
+        suggested_files=["data/train.parquet"],
+    )
+
+    def fake_resolve(
+        self,
+        source,
+        token=None,
+        include_globs=None,
+        exclude_globs=None,
+    ):
+        captured.append((include_globs or [], exclude_globs or []))
+        return resolution
+
+    monkeypatch.setattr(HuggingFaceService, "resolve", fake_resolve)
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resolved = client.post(
+        "/api/repos/resolve",
+        json={
+            "source": "datasets/owner/data",
+            "include_globs": ["**/*.parquet"],
+            "exclude_globs": ["**/test.parquet"],
+        },
+    )
+    created = client.post(
+        "/api/tasks",
+        json={
+            "source": "datasets/owner/data",
+            "selected_files": ["data/train.parquet"],
+        },
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["repo_type"] == "dataset"
+    assert resolved.json()["suggested_files"] == ["data/train.parquet"]
+    assert captured[0] == (["**/*.parquet"], ["**/test.parquet"])
+    assert created.status_code == 201
+    assert created.json()["repo_type"] == "dataset"
+    created_record = app.state.db.get_task(created.json()["id"])
+    assert created_record is not None
+    assert created_record["destination"] == f"datasets/owner/data/{'d' * 40}"

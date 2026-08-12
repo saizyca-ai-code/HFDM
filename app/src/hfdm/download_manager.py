@@ -96,7 +96,9 @@ class DownloadManager:
             raise DownloadManagerError("至少選擇一個檔案")
 
         owner, repo = resolution.repo_id.split("/", 1)
-        destination_key = self._destination_key(owner, repo, resolution.commit_hash)
+        destination_key = self._destination_key(
+            resolution.repo_type, owner, repo, resolution.commit_hash
+        )
         destination = self._resolve_destination_key(destination_key)
         missing_bytes = sum(
             item.size for item in selected if not (destination / Path(item.path)).is_file()
@@ -108,6 +110,7 @@ class DownloadManager:
         task = {
             "id": task_id,
             "repo_id": resolution.repo_id,
+            "repo_type": resolution.repo_type,
             "requested_revision": resolution.requested_revision,
             "commit_hash": resolution.commit_hash,
             "destination": destination_key,
@@ -378,7 +381,7 @@ class DownloadManager:
                 self._wake.set()
                 continue
 
-            key = f"{task['repo_id']}:{task['commit_hash']}:{file['path']}"
+            key = f"{task['repo_type']}:{task['repo_id']}:{task['commit_hash']}:{file['path']}"
             with self._lock:
                 if key in self._active:
                     continue
@@ -408,6 +411,7 @@ class DownloadManager:
         )
         payload = {
             "repo_id": task["repo_id"],
+            "repo_type": task["repo_type"],
             "commit_hash": task["commit_hash"],
             "filename": file["path"],
             "destination": str(self.task_destination(task)),
@@ -547,19 +551,25 @@ class DownloadManager:
 
     def task_destination(self, task: dict[str, Any]) -> Path:
         owner, repo = task["repo_id"].split("/", 1)
-        key = self._destination_key(owner, repo, task["commit_hash"])
+        key = self._destination_key(task["repo_type"], owner, repo, task["commit_hash"])
         return self._resolve_destination_key(key)
 
     def _normalize_task_destinations(self) -> None:
         for task in self.db.list_task_locations():
             owner, repo = task["repo_id"].split("/", 1)
-            destination = self._destination_key(owner, repo, task["commit_hash"])
+            destination = self._destination_key(
+                task["repo_type"], owner, repo, task["commit_hash"]
+            )
             if task["destination"] != destination:
                 self.db.set_task_destination(task["id"], destination)
 
-    def _destination_key(self, owner: str, repo: str, commit_hash: str) -> str:
+    def _destination_key(
+        self, repo_type: str, owner: str, repo: str, commit_hash: str
+    ) -> str:
+        if repo_type not in {"model", "dataset"}:
+            raise DownloadManagerError(f"不支援的 Hugging Face repo type：{repo_type}")
         return PurePosixPath(
-            "models",
+            "datasets" if repo_type == "dataset" else "models",
             self._safe_segment(owner),
             self._safe_segment(repo),
             self._safe_segment(commit_hash),

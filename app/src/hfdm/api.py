@@ -11,6 +11,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from .database import Database
 from .download_manager import DownloadManager, DownloadManagerError
 from .events import EventBroker
+from .file_selection import InvalidGlobPattern
 from .hf_service import HuggingFaceService
 from .repo_ref import InvalidRepoReference
 from .schemas import (
@@ -69,8 +70,13 @@ def create_router(
     @router.post("/repos/resolve", response_model=RepoResolution)
     def resolve_repo(payload: RepoResolveRequest) -> RepoResolution:
         try:
-            return hf.resolve(payload.source, token_value(payload.hf_token))
-        except InvalidRepoReference as exc:
+            return hf.resolve(
+                payload.source,
+                token_value(payload.hf_token),
+                payload.include_globs,
+                payload.exclude_globs,
+            )
+        except (InvalidRepoReference, InvalidGlobPattern) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except HfHubHTTPError as exc:
             code = exc.response.status_code if exc.response else 502
@@ -119,6 +125,7 @@ def create_router(
                 task["repo_id"],
                 task["requested_revision"],
                 token_value(payload.hf_token),
+                repo_type=task["repo_type"],
             )
         except HfHubHTTPError as exc:
             raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
@@ -160,6 +167,7 @@ def create_router(
                 task["repo_id"],
                 task["requested_revision"],
                 token,
+                repo_type=task["repo_type"],
             )
             update_available = resolution.commit_hash != task["commit_hash"]
             configured, created_new = manager.reconfigure_task(

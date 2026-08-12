@@ -238,3 +238,39 @@ def test_auth_required_task_returns_to_queue_when_configuration_supplies_token(t
     assert configured["files"][0]["status"] == "queued"
     database_files = list(manager.paths.data.glob("hfdm.sqlite3*"))
     assert all(b"hf_replacement" not in path.read_bytes() for path in database_files)
+
+
+def test_dataset_identity_destination_and_restart_token_recovery(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    commit = "d" * 40
+    dataset = RepoResolution(
+        repo_id="owner/shared-name",
+        repo_type="dataset",
+        requested_revision="main",
+        commit_hash=commit,
+        files=[RepoFileInfo(path="data/train.parquet", size=10)],
+        total_bytes=10,
+    )
+    model = RepoResolution(
+        repo_id="owner/shared-name",
+        repo_type="model",
+        requested_revision="main",
+        commit_hash=commit,
+        files=[RepoFileInfo(path="model.bin", size=10)],
+        total_bytes=10,
+    )
+
+    dataset_task = manager.create_task(dataset, ["data/train.parquet"], "hf_private")
+    model_task = manager.create_task(model, ["model.bin"], None)
+
+    assert dataset_task["repo_type"] == "dataset"
+    assert dataset_task["destination"] == f"datasets/owner/shared-name/{commit}"
+    assert model_task["destination"] == f"models/owner/shared-name/{commit}"
+    assert manager.task_destination(dataset_task) != manager.task_destination(model_task)
+
+    restarted = DownloadManager(manager.paths, manager.db, manager.broker)
+    with pytest.raises(DownloadManagerError, match="重新提供 Hugging Face token"):
+        restarted.resume(dataset_task["id"])
+    resumed = restarted.resume(dataset_task["id"], token="hf_again")
+    assert resumed["status"] == "queued"
+    assert b"hf_again" not in manager.paths.database.read_bytes()

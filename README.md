@@ -1,6 +1,6 @@
 # HFDM
 
-HFDM is a LAN-first Hugging Face model download manager. It provides a React/shadcn web interface backed by FastAPI, `huggingface_hub`, SQLite, and isolated per-file download workers.
+HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides a React/shadcn web interface backed by FastAPI, `huggingface_hub`, SQLite, and isolated per-file download workers.
 
 ## V1 capabilities
 
@@ -16,6 +16,15 @@ HFDM is a LAN-first Hugging Face model download manager. It provides a React/sha
 - Serves completed files with HTTP Range support for browser resume.
 - Restricts task control, deletion, and settings changes to loopback administrators.
 - Supports global capacity, free-space reserve, retention, and physical-delete policy settings.
+
+## V2 capabilities under development
+
+- Accepts Hugging Face Model and Dataset URLs, including `/tree/<revision>` references.
+- Keeps Model and Dataset identity separate and stores them under `download/models/` and `download/datasets/`.
+- Previews Dataset selections with comma- or newline-separated include/exclude glob patterns.
+- Separates immutable transfer history from reconciled local availability and supports restoring moved or missing files.
+- Includes an opt-in Model/Dataset benchmark harness under `app/tests/benchmarks/` for balanced, maximum, and HDD Xet profiles.
+- Civitai is intentionally deferred to D004 Phase 3.
 
 ## Requirements
 
@@ -156,6 +165,7 @@ Run verification:
 ```text
 data/hfdm.sqlite3
 download/models/<owner>/<repo>/<commit>/<repo files>
+download/datasets/<owner>/<repo>/<commit>/<repo files>
 ```
 
 Both directories are runtime state and are ignored by Git. Task destinations are

@@ -39,7 +39,7 @@ def main() -> int:
         path = hf_hub_download(
             repo_id=payload["repo_id"],
             filename=payload["filename"],
-            repo_type="model",
+            repo_type=payload.get("repo_type", "model"),
             revision=payload["commit_hash"],
             local_dir=payload["destination"],
             token=payload.get("token") or False,

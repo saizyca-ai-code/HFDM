@@ -312,7 +312,11 @@ class Database:
                     NULL, :created_at, :updated_at
                 )
                 """,
-                {"provider": "huggingface", "repo_type": "model", **task},
+                {
+                    "provider": "huggingface",
+                    "repo_type": task.get("repo_type", "model"),
+                    **task,
+                },
             )
             conn.execute(
                 """
@@ -621,7 +625,11 @@ class Database:
             return [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT id, repo_id, commit_hash, destination FROM tasks"
+                    """
+                    SELECT id, repo_type, remote_id AS repo_id,
+                           resolved_revision AS commit_hash, destination
+                    FROM download_records
+                    """
                 ).fetchall()
             ]
 
