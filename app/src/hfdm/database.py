@@ -464,7 +464,13 @@ class Database:
             return [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT * FROM tasks WHERE status IN ('queued', 'downloading') ORDER BY created_at"
+                    """
+                    SELECT tasks.*, download_records.provider, download_records.repo_type
+                    FROM tasks
+                    JOIN download_records ON download_records.id = tasks.id
+                    WHERE tasks.status IN ('queued', 'downloading')
+                    ORDER BY tasks.created_at
+                    """
                 ).fetchall()
             ]
 

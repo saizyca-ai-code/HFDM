@@ -4,7 +4,7 @@ import pytest
 
 from hfdm.config import AppPaths
 from hfdm.database import Database
-from hfdm.download_manager import DownloadManager, DownloadManagerError
+from hfdm.download_manager import ActiveWorker, DownloadManager, DownloadManagerError
 from hfdm.events import EventBroker
 from hfdm.schemas import RepoFileInfo, RepoResolution
 
@@ -274,3 +274,56 @@ def test_dataset_identity_destination_and_restart_token_recovery(tmp_path: Path)
     resumed = restarted.resume(dataset_task["id"], token="hf_again")
     assert resumed["status"] == "queued"
     assert b"hf_again" not in manager.paths.database.read_bytes()
+
+
+def test_dataset_runnable_task_includes_repo_type_for_dispatch(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    dataset = RepoResolution(
+        repo_id="inlineresearch/krea2-skin-lora",
+        repo_type="dataset",
+        requested_revision="main",
+        commit_hash="d" * 40,
+        files=[RepoFileInfo(path="README.md", size=10)],
+        total_bytes=10,
+    )
+    created = manager.create_task(dataset, ["README.md"], None)
+
+    runnable = manager.db.runnable_tasks()
+
+    assert len(runnable) == 1
+    assert runnable[0]["id"] == created["id"]
+    assert runnable[0]["provider"] == "huggingface"
+    assert runnable[0]["repo_type"] == "dataset"
+
+
+def test_coordinator_dispatches_dataset_worker(tmp_path: Path, monkeypatch) -> None:
+    manager = make_manager(tmp_path)
+    dataset = RepoResolution(
+        repo_id="inlineresearch/krea2-skin-lora",
+        repo_type="dataset",
+        requested_revision="main",
+        commit_hash="d" * 40,
+        files=[RepoFileInfo(path="README.md", size=10)],
+        total_bytes=10,
+    )
+    created = manager.create_task(dataset, ["README.md"], None)
+    dispatched: list[dict] = []
+
+    def fake_spawn(task, file, key):
+        dispatched.append(task)
+        return ActiveWorker(task["id"], file["id"], key, None)  # type: ignore[arg-type]
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(manager, "_spawn", fake_spawn)
+    monkeypatch.setattr("hfdm.download_manager.threading.Thread", FakeThread)
+
+    manager._dispatch()
+
+    assert dispatched[0]["repo_type"] == "dataset"
+    assert manager.db.get_task(created["id"])["status"] == "downloading"  # type: ignore[index]
