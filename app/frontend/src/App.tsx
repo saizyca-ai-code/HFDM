@@ -37,6 +37,26 @@ import { cn, formatBytes, formatEta, percent } from "@/lib/utils"
 
 type Page = "new" | "transfers" | "library" | "settings"
 
+type NewDownloadDraft = {
+  source: string
+  token: string
+  includeGlobs: string
+  excludeGlobs: string
+  repo: RepoResolution | null
+  selected: Set<string>
+}
+
+function emptyDownloadDraft(): NewDownloadDraft {
+  return {
+    source: "",
+    token: "",
+    includeGlobs: "",
+    excludeGlobs: "",
+    repo: null,
+    selected: new Set(),
+  }
+}
+
 const statusMeta: Record<string, { label: string; className: string }> = {
   queued: { label: "等待中", className: "border-sky-400/20 bg-sky-400/10 text-sky-300" },
   resolving: { label: "解析中", className: "border-sky-400/20 bg-sky-400/10 text-sky-300" },
@@ -60,6 +80,10 @@ const availabilityMeta: Record<string, { label: string; className: string }> = {
 
 function App() {
   const [page, setPage] = useState<Page>("new")
+  const [downloadDraft, setDownloadDraft] = useState<NewDownloadDraft>(() => ({
+    ...emptyDownloadDraft(),
+    source: "https://huggingface.co/Comfy-Org/z_image_turbo/tree/main",
+  }))
   const [tasks, setTasks] = useState<DownloadTask[]>([])
   const [library, setLibrary] = useState<LibraryItem[]>([])
   const [isAdmin, setIsAdmin] = useState(false)
@@ -138,7 +162,7 @@ function App() {
         </header>
 
         <div className="mx-auto max-w-7xl px-4 py-7 md:px-8 md:py-10">
-          {page === "new" && <NewDownload onCreated={() => { void refreshTasks(); setPage("transfers") }} />}
+          {page === "new" && <NewDownload draft={downloadDraft} setDraft={setDownloadDraft} onCreated={() => { setDownloadDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
@@ -167,16 +191,19 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
   return <div className="mb-7 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><div className="mb-2 text-[10px] font-bold uppercase tracking-[.24em] text-cyan-400/70">{eyebrow}</div><h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">{title}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p></div>{action}</div>
 }
 
-function NewDownload({ onCreated }: { onCreated: () => void }) {
-  const [source, setSource] = useState("https://huggingface.co/Comfy-Org/z_image_turbo/tree/main")
-  const [token, setToken] = useState("")
-  const [includeGlobs, setIncludeGlobs] = useState("")
-  const [excludeGlobs, setExcludeGlobs] = useState("")
-  const [repo, setRepo] = useState<RepoResolution | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
+function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; onCreated: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const { source, token, includeGlobs, excludeGlobs, repo, selected } = draft
   const selectedBytes = useMemo(() => repo?.files.filter((file) => selected.has(file.path)).reduce((sum, file) => sum + file.size, 0) ?? 0, [repo, selected])
+
+  const updateDraft = (values: Partial<NewDownloadDraft>) => {
+    setDraft((current) => ({ ...current, ...values }))
+  }
+  const clearDraft = () => {
+    setDraft(emptyDownloadDraft())
+    setError("")
+  }
 
   const resolve = async () => {
     setBusy(true); setError("")
@@ -187,8 +214,7 @@ function NewDownload({ onCreated }: { onCreated: () => void }) {
         splitGlobInput(includeGlobs),
         splitGlobInput(excludeGlobs),
       )
-      setRepo(result)
-      setSelected(new Set(result.suggested_files))
+      updateDraft({ repo: result, selected: new Set(result.suggested_files) })
     } catch (reason) { setError(reason instanceof Error ? reason.message : "讀取 repo 失敗") }
     finally { setBusy(false) }
   }
@@ -197,27 +223,26 @@ function NewDownload({ onCreated }: { onCreated: () => void }) {
     setBusy(true); setError("")
     try {
       await api.createTask(source, [...selected], token)
-      setToken("")
       onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : "建立任務失敗") }
     finally { setBusy(false) }
   }
 
   return <>
-    <PageHeading eyebrow="New transfer" title="從 Hugging Face 取得內容" description="貼上 Model 或 Dataset ID／網址，選擇需要的檔案。Token 只在此任務的記憶體中使用，不會保存到伺服器。" />
+    <PageHeading eyebrow="New transfer" title="從 Hugging Face 取得內容" description="解析草稿會在切換 HFDM 分頁時保留於記憶體；Token 不會寫入瀏覽器儲存或伺服器。" action={<Button variant="ghost" onClick={clearDraft} disabled={busy || (!source && !token && !includeGlobs && !excludeGlobs && !repo)}><Trash2 className="size-4" />清除草稿</Button>} />
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
       <Card>
         <CardHeader><h2 className="font-semibold text-white">Repo 來源</h2><p className="text-xs text-slate-500">支援 owner/repo、datasets/owner/repo、Model／Dataset 網址與 /tree/&lt;revision&gt;</p></CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => setSource(event.target.value)} placeholder="Comfy-Org/z_image_turbo" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button></div>
-          <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="HF Token（選填；不儲存）" /></div>
-          <div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => setIncludeGlobs(event.target.value)} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => setExcludeGlobs(event.target.value)} placeholder="Exclude glob，例如 data/test/**" /></div>
+          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => updateDraft({ source: event.target.value })} placeholder="Comfy-Org/z_image_turbo" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button></div>
+          <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => updateDraft({ token: event.target.value })} placeholder="HF Token（選填；只暫存於此頁面記憶體）" /></div>
+          <div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => updateDraft({ includeGlobs: event.target.value })} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => updateDraft({ excludeGlobs: event.target.value })} placeholder="Exclude glob，例如 data/test/**" /></div>
           <div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div>
           {error && <div className="flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
           {repo && <div className="space-y-4 pt-2">
             <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.repo_id}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
             {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
-            <FileTree files={repo.files} selected={selected} onChange={setSelected} />
+            <FileTree files={repo.files} selected={selected} onChange={(next) => updateDraft({ selected: next })} />
             <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
           </div>}
         </CardContent>
