@@ -94,6 +94,32 @@ function storedCreationBehavior(): CreationBehavior {
   }
 }
 
+function storedValue<T>(key: string, fallback: T): T {
+  try {
+    const value = window.localStorage.getItem(key)
+    return value ? JSON.parse(value) as T : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function useStoredState<T>(key: string, fallback: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [value, setValue] = useState<T>(() => storedValue(key, fallback))
+  useEffect(() => { window.localStorage.setItem(key, JSON.stringify(value)) }, [key, value])
+  return [value, setValue]
+}
+
+function storedDraft(provider: DownloadProvider): NewDownloadDraft {
+  const stored = storedValue<Partial<NewDownloadDraft>>(`hfdm.${provider}.options`, {})
+  return {
+    ...emptyDownloadDraft(),
+    source: typeof stored.source === "string" ? stored.source : "",
+    includeGlobs: typeof stored.includeGlobs === "string" ? stored.includeGlobs : "",
+    excludeGlobs: typeof stored.excludeGlobs === "string" ? stored.excludeGlobs : "",
+    versionId: typeof stored.versionId === "string" ? stored.versionId : "",
+  }
+}
+
 function emptyDownloadDraft(): NewDownloadDraft {
   return {
     source: "",
@@ -128,12 +154,9 @@ const availabilityMeta: Record<string, { label: string; className: string }> = {
 }
 
 function App() {
-  const [page, setPage] = useState<Page>("huggingface")
-  const [hfDraft, setHfDraft] = useState<NewDownloadDraft>(() => ({
-    ...emptyDownloadDraft(),
-    source: "https://huggingface.co/Comfy-Org/z_image_turbo/tree/main",
-  }))
-  const [civitaiDraft, setCivitaiDraft] = useState<NewDownloadDraft>(emptyDownloadDraft)
+  const [page, setPage] = useStoredState<Page>("hfdm.active-page", "huggingface")
+  const [hfDraft, setHfDraft] = useState<NewDownloadDraft>(() => storedDraft("huggingface"))
+  const [civitaiDraft, setCivitaiDraft] = useState<NewDownloadDraft>(() => storedDraft("civitai"))
   const [creationBehavior, setCreationBehavior] = useState<CreationBehavior>(storedCreationBehavior)
   const [tasks, setTasks] = useState<DownloadTask[]>([])
   const [library, setLibrary] = useState<LibraryItem[]>([])
@@ -171,6 +194,16 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem("hfdm.creation-behavior", JSON.stringify(creationBehavior))
   }, [creationBehavior])
+
+  useEffect(() => {
+    const { source, includeGlobs, excludeGlobs, versionId } = hfDraft
+    window.localStorage.setItem("hfdm.huggingface.options", JSON.stringify({ source, includeGlobs, excludeGlobs, versionId }))
+  }, [hfDraft.source, hfDraft.includeGlobs, hfDraft.excludeGlobs, hfDraft.versionId])
+
+  useEffect(() => {
+    const { source, includeGlobs, excludeGlobs, versionId } = civitaiDraft
+    window.localStorage.setItem("hfdm.civitai.options", JSON.stringify({ source, includeGlobs, excludeGlobs, versionId }))
+  }, [civitaiDraft.source, civitaiDraft.includeGlobs, civitaiDraft.excludeGlobs, civitaiDraft.versionId])
 
   const activeCount = tasks.filter((task) => ["queued", "downloading", "pausing"].includes(task.status)).length
 
@@ -218,8 +251,8 @@ function App() {
         </header>
 
         <div className="mx-auto max-w-7xl px-4 py-7 md:px-8 md:py-10">
-          {page === "huggingface" && <NewDownload provider="huggingface" draft={hfDraft} setDraft={setHfDraft} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setHfDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
-          {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
+          {page === "huggingface" && <NewDownload provider="huggingface" draft={hfDraft} setDraft={setHfDraft} tasks={tasks} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setHfDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
+          {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} tasks={tasks} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
@@ -249,13 +282,17 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
   return <div className="mb-7 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><div className="mb-2 text-[10px] font-bold uppercase tracking-[.24em] text-cyan-400/70">{eyebrow}</div><h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">{title}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p></div>{action}</div>
 }
 
-function NewDownload({ provider, draft, setDraft, creationBehavior, setCreationBehavior, onCreated }: { provider: DownloadProvider; draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; creationBehavior: CreationBehavior; setCreationBehavior: React.Dispatch<React.SetStateAction<CreationBehavior>>; onCreated: () => void }) {
+function NewDownload({ provider, draft, setDraft, tasks, creationBehavior, setCreationBehavior, onCreated }: { provider: DownloadProvider; draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; tasks: DownloadTask[]; creationBehavior: CreationBehavior; setCreationBehavior: React.Dispatch<React.SetStateAction<CreationBehavior>>; onCreated: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [createdNotice, setCreatedNotice] = useState("")
   const { source, token, includeGlobs, excludeGlobs, versionId, repo, selected } = draft
   const isCivitai = provider === "civitai"
   const selectedBytes = useMemo(() => repo?.files.filter((file) => selected.has(file.path)).reduce((sum, file) => sum + file.size, 0) ?? 0, [repo, selected])
+  const matchingTasks = useMemo(() => repo ? tasks.filter((task) => task.provider === repo.provider && task.repo_type === repo.repo_type && task.repo_id === repo.repo_id && task.commit_hash === repo.commit_hash) : [], [repo, tasks])
+  const existingPaths = useMemo(() => new Set(matchingTasks.flatMap((task) => task.files.map((file) => file.path))), [matchingTasks])
+  const selectedExistingCount = [...selected].filter((path) => existingPaths.has(path)).length
+  const selectedNewCount = selected.size - selectedExistingCount
 
   const updateDraft = (values: Partial<NewDownloadDraft>) => {
     setDraft((current) => ({ ...current, ...values }))
@@ -269,12 +306,13 @@ function NewDownload({ provider, draft, setDraft, creationBehavior, setCreationB
   const resolve = async (nextVersionId?: number) => {
     setBusy(true); setError(""); setCreatedNotice("")
     try {
+      const requestedVersionId = nextVersionId ?? (isCivitai && versionId ? Number(versionId) : undefined)
       const result = await api.resolveRepo(
         source,
         token,
         splitGlobInput(includeGlobs),
         splitGlobInput(excludeGlobs),
-        nextVersionId,
+        requestedVersionId,
       )
       if (result.provider !== provider) throw new Error(`此入口只接受 ${isCivitai ? "Civitai model URL" : "Hugging Face Model／Dataset URL"}`)
       updateDraft({ repo: result, versionId: result.provider === "civitai" ? result.commit_hash : "", selected: new Set(result.suggested_files) })
@@ -309,9 +347,12 @@ function NewDownload({ provider, draft, setDraft, creationBehavior, setCreationB
             {repo.provider === "civitai" && <div className="rounded-lg border border-cyan-400/15 bg-cyan-400/[.04] p-3 text-xs leading-5 text-slate-400">{String(repo.provider_metadata.model_type || "Model")}{repo.provider_metadata.base_model ? ` · ${String(repo.provider_metadata.base_model)}` : ""}{repo.provider_metadata.creator ? ` · by ${String(repo.provider_metadata.creator)}` : ""}。完成時會驗證 Civitai 提供的 SHA256。</div>}
             {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
             {repo.provider === "civitai" && <div className="text-xs font-medium text-slate-300">此版本的檔案變體與附加內容</div>}
+            {matchingTasks.length > 0 && <div className={cn("rounded-lg border p-3 text-xs leading-5", selectedNewCount ? "border-amber-400/15 bg-amber-400/[.05] text-amber-200" : "border-emerald-400/15 bg-emerald-400/[.05] text-emerald-300")}>
+              內容庫／任務中已有此來源版本的 {existingPaths.size} 個檔案；目前選取中 {selectedExistingCount} 個已存在、{selectedNewCount} 個將新增。{selectedNewCount ? "建立時會合併至同一來源版本，不會另留重複任務。" : "目前設定已存在，不需要重複建立。"}
+            </div>}
             <FileTree files={repo.files} selected={selected} onChange={(next) => updateDraft({ selected: next })} />
             <div className="space-y-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4">
-              <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
+              <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size || (matchingTasks.length > 0 && selectedNewCount === 0)}><Play className="size-4 fill-current" />{matchingTasks.length > 0 ? selectedNewCount ? "合併新增檔案" : "設定已存在" : "建立下載任務"}</Button></div>
               <div className="flex flex-wrap gap-x-5 gap-y-2 border-t border-white/[.05] pt-3 text-xs text-slate-400">
                 <label className="flex cursor-pointer items-center gap-2"><Checkbox checked={creationBehavior.clearAfterCreate} onCheckedChange={(checked) => setCreationBehavior((current) => ({ ...current, clearAfterCreate: checked }))} />建立後清除目前設定</label>
                 <label className="flex cursor-pointer items-center gap-2"><Checkbox checked={creationBehavior.openTransfersAfterCreate} onCheckedChange={(checked) => setCreationBehavior((current) => ({ ...current, openTransfersAfterCreate: checked }))} />建立後前往傳輸任務</label>
@@ -339,18 +380,29 @@ function MetricCard({ icon: Icon, label, value, note }: { icon: typeof Archive; 
 }
 
 function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
-  const [category, setCategory] = useState<SourceCategory | "all">("all")
+  const [category, setCategory] = useStoredState<SourceCategory | "all">("hfdm.transfers.category", "all")
   const active = tasks.filter((task) => task.status !== "completed" && task.status !== "cancelled")
   const counts = useMemo(() => ({
     "hf-model": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-model").length,
     "hf-dataset": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-dataset").length,
-    "civitai-model": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "civitai-model").length,
+    "civitai-model": new Set(tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "civitai-model").map((task) => task.repo_id)).size,
   }), [tasks])
   const visible = category === "all" ? tasks : tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === category)
+  const regularTasks = visible.filter((task) => task.provider !== "civitai")
+  const civitaiGroups = [...new Map(visible.filter((task) => task.provider === "civitai").map((task) => [task.repo_id, visible.filter((candidate) => candidate.provider === "civitai" && candidate.repo_id === task.repo_id)])).values()]
   return <><PageHeading eyebrow="Transfers" title="下載任務" description="即時查看服務端取得進度。暫停會停止排程並終止正在執行的檔案 worker。" action={<div className="flex items-center gap-2 text-xs text-slate-500"><CircleGauge className="size-4 text-cyan-400" />{active.length} active</div>} />
     <CategoryTabs value={category} onChange={setCategory} counts={counts} includeAll />
-    <div className="space-y-4">{visible.length ? visible.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
+    <div className="space-y-4">{visible.length ? <>{regularTasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />)}{civitaiGroups.map((group) => <CivitaiTaskGroup key={group[0].repo_id} tasks={group} isAdmin={isAdmin} refresh={refresh} />)}</> : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
   </>
+}
+
+function CivitaiTaskGroup({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
+  const versions = [...new Map(tasks.map((task) => [task.commit_hash, task])).values()]
+  const duplicateCount = tasks.length - versions.length
+  return <Card className="overflow-hidden border-cyan-400/15 bg-cyan-400/[.015]">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-cyan-400/10 p-4"><div><div className="flex items-center gap-2"><Box className="size-5 text-cyan-400" /><h3 className="font-semibold text-white">{tasks[0].display_name || tasks[0].repo_id}</h3><SourceBadge provider="civitai" repoType="model" /></div><div className="mt-1 text-xs text-slate-500">{versions.length} 個系列版本 · {new Set(tasks.flatMap((task) => task.files.map((file) => file.remote_id || file.path))).size} 個檔案</div></div>{duplicateCount > 0 && <Badge>{duplicateCount} 筆舊重複紀錄已折疊</Badge>}</div>
+    <div className="space-y-3 p-3">{versions.map((task) => <div key={task.commit_hash}><div className="mb-1 px-2 text-[10px] uppercase tracking-wider text-cyan-400/60">Version {String(task.provider_metadata.version_name || task.commit_hash)}</div><TaskCard task={task} isAdmin={isAdmin} refresh={refresh} /></div>)}</div>
+  </Card>
 }
 
 function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boolean; refresh: () => Promise<void> }) {
@@ -478,13 +530,26 @@ function CivitaiLibraryMetadata({ item, onTag }: { item: LibraryItem; onTag: (ta
   </div>
 }
 
+function LibraryVersionCard({ item, isAdmin, restoringId, restore, onTag }: { item: LibraryItem; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; onTag: (tag: string) => void }) {
+  const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
+  const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
+  return <Card><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent>{item.provider === "civitai" && <CivitaiLibraryMetadata item={item} onTag={onTag} />}<div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+}
+
+function CivitaiLibraryGroup({ items, isAdmin, restoringId, restore, onTag }: { items: LibraryItem[]; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; onTag: (tag: string) => void }) {
+  return <Card className="overflow-hidden border-cyan-400/15 bg-cyan-400/[.015] md:col-span-2">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-cyan-400/10 p-4"><div className="flex items-center gap-2"><Library className="size-5 text-cyan-400" /><h3 className="font-semibold text-white">{items[0].display_name || items[0].repo_id}</h3><SourceBadge provider="civitai" repoType="model" /></div><Badge>{items.length} 個系列版本</Badge></div>
+    <div className="grid gap-3 p-3 md:grid-cols-2">{items.map((item) => <div key={item.key}><div className="mb-1 px-2 text-[10px] uppercase tracking-wider text-cyan-400/60">Version {item.commit_hash}</div><LibraryVersionCard item={item} isAdmin={isAdmin} restoringId={restoringId} restore={restore} onTag={onTag} /></div>)}</div>
+  </Card>
+}
+
 function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmin: boolean; refresh: () => Promise<void> }) {
-  const [category, setCategory] = useState<SourceCategory>("hf-model")
-  const [query, setQuery] = useState("")
-  const [modelType, setModelType] = useState("")
-  const [baseModel, setBaseModel] = useState("")
-  const [tag, setTag] = useState("")
-  const [comfyuiFolder, setComfyuiFolder] = useState("")
+  const [category, setCategory] = useStoredState<SourceCategory>("hfdm.library.category", "hf-model")
+  const [query, setQuery] = useStoredState("hfdm.library.query", "")
+  const [modelType, setModelType] = useStoredState("hfdm.library.model-type", "")
+  const [baseModel, setBaseModel] = useStoredState("hfdm.library.base-model", "")
+  const [tag, setTag] = useStoredState("hfdm.library.tag", "")
+  const [comfyuiFolder, setComfyuiFolder] = useStoredState("hfdm.library.comfyui-folder", "")
   const [scanning, setScanning] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
   const [error, setError] = useState("")
@@ -510,7 +575,7 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
   const counts = useMemo(() => ({
     "hf-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-model").length,
     "hf-dataset": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-dataset").length,
-    "civitai-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").length,
+    "civitai-model": new Set(items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").map((item) => item.repo_id)).size,
   }), [items])
   const civitaiItems = useMemo(() => items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model"), [items])
   const filterOptions = useMemo(() => ({
@@ -535,6 +600,8 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     }
     return true
   })
+  const regularItems = visible.filter((item) => item.provider !== "civitai")
+  const civitaiGroups = [...new Map(visible.filter((item) => item.provider === "civitai").map((item) => [item.repo_id, visible.filter((candidate) => candidate.provider === "civitai" && candidate.repo_id === item.repo_id)])).values()]
   return <><PageHeading eyebrow="Content library" title="內容庫與本機狀態" description="Hugging Face Model、Hugging Face Dataset 與 Civitai Model 分類管理；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
     <CategoryTabs value={category} onChange={(value) => value !== "all" && setCategory(value)} counts={counts} />
     <div className="mb-5 rounded-xl border border-white/[.06] bg-white/[.02] p-3">
@@ -556,11 +623,7 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
       </div>}
     </div>
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
-    <div className="grid gap-4 md:grid-cols-2">{visible.length ? visible.map((item) => {
-      const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
-      const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
-      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent>{item.provider === "civitai" && <CivitaiLibraryMetadata item={item} onTag={setTag} />}<div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
-    }) : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
+    <div className="grid gap-4 md:grid-cols-2">{visible.length ? <>{regularItems.map((item) => <LibraryVersionCard key={item.key} item={item} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} onTag={setTag} />)}{civitaiGroups.map((group) => <CivitaiLibraryGroup key={group[0].repo_id} items={group} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} onTag={setTag} />)}</> : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }
 

@@ -37,6 +37,11 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
 - Keeps the resolved source, version, token, and file selection in memory after
   creating a task by default; optional independent preferences can clear the
   draft or open Transfers after creation.
+- Detects an existing source/version before task creation, reuses identical
+  selections, and merges new files instead of retaining duplicate tasks.
+- Groups Civitai transfer and library entries by model, with versions and file
+  variants nested under the model. Non-sensitive page and filter options are
+  remembered by the browser; tokens are never persisted there.
 
 ## Requirements
 

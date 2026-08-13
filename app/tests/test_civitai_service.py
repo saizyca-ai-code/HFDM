@@ -70,6 +70,7 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
     assert resolution.commit_hash == "456"
     assert resolution.display_name == "Example LoRA"
     assert resolution.provider_metadata["model_type"] == "LORA"
+    assert resolution.provider_metadata["version_name"] == "v2"
     assert resolution.provider_metadata["base_model"] == "SDXL 1.0"
     assert resolution.provider_metadata["base_model_type"] == "Standard"
     assert resolution.provider_metadata["tags"] == ["style", "character"]

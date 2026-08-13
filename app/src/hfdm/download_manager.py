@@ -81,6 +81,8 @@ class DownloadManager:
         resolution: RepoResolution,
         selected_paths: list[str],
         token: str | None,
+        *,
+        deduplicate: bool = True,
     ) -> dict[str, Any]:
         available = {item.path: item for item in resolution.files}
         selected = []
@@ -95,6 +97,42 @@ class DownloadManager:
             selected.append(available[normalized])
         if not selected:
             raise DownloadManagerError("至少選擇一個檔案")
+
+        if deduplicate:
+            matches = [
+                task
+                for task in self.db.list_tasks()
+                if task["provider"] == resolution.provider
+                and task["repo_type"] == resolution.repo_type
+                and task["repo_id"] == resolution.repo_id
+                and task["commit_hash"] == resolution.commit_hash
+            ]
+            if matches:
+                requested = {item.path for item in selected}
+                existing = {
+                    file["path"]
+                    for task in matches
+                    for file in task["files"]
+                    if file["path"] in available
+                }
+                union = requested | existing
+                if len(matches) == 1 and union == existing:
+                    if token:
+                        self._tokens[matches[0]["id"]] = token
+                    return matches[0]
+                if any(task["status"] in {"downloading", "pausing"} for task in matches):
+                    raise DownloadManagerError("相同來源版本已有執行中的任務；請先暫停後再合併檔案")
+                consolidated = self.create_task(
+                    resolution,
+                    sorted(union),
+                    token,
+                    deduplicate=False,
+                )
+                for task in matches:
+                    self.db.delete_task(task["id"])
+                    self._tokens.pop(task["id"], None)
+                    self._publish(task["id"], "merged")
+                return consolidated
 
         destination_key = self._destination_key(
             resolution.provider,
@@ -165,7 +203,12 @@ class DownloadManager:
         update_available = task["commit_hash"] != resolution.commit_hash
         editable = task["status"] in {"queued", "paused", "auth_required"}
         if update_available or not editable:
-            created = self.create_task(resolution, [item.path for item in selected], token)
+            created = self.create_task(
+                resolution,
+                [item.path for item in selected],
+                token,
+                deduplicate=False,
+            )
             self.db.delete_task(task_id)
             self._tokens.pop(task_id, None)
             self._publish(task_id, "replaced")

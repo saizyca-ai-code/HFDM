@@ -42,6 +42,33 @@ def test_task_can_pause_and_resume_without_starting_worker(tmp_path: Path) -> No
     assert manager.resume(task["id"])["status"] == "queued"
 
 
+def test_same_source_version_is_reused_or_merged_without_duplicate_tasks(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        requested_revision="latest",
+        commit_hash="456",
+        files=[
+            RepoFileInfo(path="fp16.safetensors", size=10),
+            RepoFileInfo(path="fp8.safetensors", size=5),
+        ],
+        total_bytes=15,
+    )
+
+    original = manager.create_task(resolution, ["fp16.safetensors"], None)
+    reused = manager.create_task(resolution, ["fp16.safetensors"], None)
+    merged = manager.create_task(resolution, ["fp8.safetensors"], None)
+
+    assert reused["id"] == original["id"]
+    assert merged["id"] != original["id"]
+    assert {file["path"] for file in merged["files"]} == {
+        "fp16.safetensors",
+        "fp8.safetensors",
+    }
+    assert [task["id"] for task in manager.db.list_tasks()] == [merged["id"]]
+
+
 @pytest.mark.parametrize("path", ["../secret", "CON", "bad:name.bin", "/absolute"])
 def test_unsafe_repo_paths_are_rejected(tmp_path: Path, path: str) -> None:
     manager = make_manager(tmp_path)

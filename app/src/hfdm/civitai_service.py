@@ -144,6 +144,7 @@ class CivitaiService:
             provider_metadata={
                 "model_id": model_id,
                 "version_id": selected_id,
+                "version_name": str(selected.get("name") or selected_id),
                 "model_type": model_type,
                 "base_model": selected.get("baseModel"),
                 "base_model_type": selected.get("baseModelType"),
