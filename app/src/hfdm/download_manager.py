@@ -450,6 +450,7 @@ class DownloadManager:
                     "expected_size": file["size"],
                     "expected_sha256": file.get("expected_sha256"),
                     "download_url": file.get("download_url"),
+                    "provider_metadata": file.get("provider_metadata", {}),
                     "segments": self.db.get_settings()["civitai_segments"],
                 }
             )
@@ -461,6 +462,7 @@ class DownloadManager:
     def _monitor(self, worker: ActiveWorker, expected_size: int) -> None:
         last_error: str | None = None
         auth_required = False
+        current_expected_size = expected_size
         assert worker.process.stdout is not None
         for line in worker.process.stdout:
             try:
@@ -468,7 +470,11 @@ class DownloadManager:
             except json.JSONDecodeError:
                 continue
             if event.get("type") == "progress":
-                downloaded = min(int(event.get("downloaded", 0)), expected_size)
+                reported_total = int(event.get("total", 0))
+                if current_expected_size <= 0 and reported_total > 0:
+                    current_expected_size = reported_total
+                    self.db.update_file_size(worker.file_id, reported_total)
+                downloaded = min(int(event.get("downloaded", 0)), current_expected_size)
                 now = time.monotonic()
                 previous_bytes, previous_at, previous_speed = self._progress_state.get(
                     worker.file_id, (downloaded, now, 0.0)
@@ -505,7 +511,7 @@ class DownloadManager:
             self.db.update_file(
                 worker.file_id,
                 status="completed",
-                downloaded_bytes=expected_size,
+                downloaded_bytes=current_expected_size,
                 error=None,
             )
         elif auth_required:

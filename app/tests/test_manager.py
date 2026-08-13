@@ -411,3 +411,45 @@ def test_civitai_worker_auth_error_changes_task_to_auth_required(tmp_path: Path)
     assert failed["status"] == "auth_required"
     assert failed["requires_token"] is True
     assert failed["files"][0]["status"] == "paused"
+
+
+def test_civitai_unknown_media_size_updates_task_totals_from_worker(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        repo_type="model",
+        requested_revision="latest",
+        commit_hash="456",
+        files=[
+            RepoFileInfo(
+                path="examples/preview.jpeg",
+                remote_id="image:1",
+                provider_metadata={
+                    "kind": "example_image",
+                    "download_url": "https://image.civitai.com/preview.jpeg",
+                },
+            )
+        ],
+        total_bytes=0,
+    )
+    task = manager.create_task(resolution, ["examples/preview.jpeg"], None)
+    file = task["files"][0]
+
+    class SuccessfulProcess:
+        stdout = io.StringIO('{"type":"progress","downloaded":12,"total":12}\n')
+        stderr = io.StringIO("")
+
+        @staticmethod
+        def wait():
+            return 0
+
+    worker = ActiveWorker(task["id"], file["id"], "civitai:image", SuccessfulProcess())  # type: ignore[arg-type]
+    manager._active[worker.key] = worker
+    manager._monitor(worker, 0)
+
+    completed = manager.db.get_task(task["id"])
+    assert completed is not None
+    assert completed["total_bytes"] == 12
+    assert completed["downloaded_bytes"] == 12
+    assert completed["files"][0]["size"] == 12

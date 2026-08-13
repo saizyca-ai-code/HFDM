@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
+from pathlib import PurePosixPath
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .civitai_ref import CivitaiReference, parse_civitai_reference
-from .schemas import CivitaiSearchRequest, CivitaiSearchResult, RepoFileInfo, RepoResolution, SourceVersionInfo
+from .schemas import RepoFileInfo, RepoResolution, SourceVersionInfo
 
 
 class CivitaiServiceError(RuntimeError):
@@ -65,53 +67,6 @@ class CivitaiService:
                 selected = None
         return self.resolve(source, token, selected)
 
-    def search(self, request: CivitaiSearchRequest, token: str | None = None) -> CivitaiSearchResult:
-        params: list[tuple[str, str | int]] = [
-            ("limit", request.limit),
-            ("page", request.page),
-            ("sort", request.sort),
-            ("period", request.period),
-        ]
-        for key in ("query", "tag", "username"):
-            value = getattr(request, key)
-            if value:
-                params.append((key, value))
-        params.extend(("types", value) for value in request.types)
-        params.extend(("baseModels", value) for value in request.base_models)
-        payload = self._get_json(f"/models?{urlencode(params)}", token)
-        items = []
-        for raw in payload.get("items") or []:
-            if not isinstance(raw, dict) or not raw.get("id"):
-                continue
-            versions = raw.get("modelVersions") or []
-            latest = versions[0] if versions and isinstance(versions[0], dict) else {}
-            images = latest.get("images") or []
-            creator = raw.get("creator") or {}
-            items.append(
-                {
-                    "id": int(raw["id"]),
-                    "name": str(raw.get("name") or raw["id"]),
-                    "model_type": raw.get("type"),
-                    "creator": creator.get("username") if isinstance(creator, dict) else None,
-                    "latest_version_id": int(latest["id"]) if latest.get("id") else None,
-                    "base_model": latest.get("baseModel"),
-                    "preview_url": (
-                        images[0].get("url")
-                        if images and isinstance(images[0], dict)
-                        else None
-                    ),
-                }
-            )
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        current = int(metadata.get("currentPage") or request.page)
-        total = int(metadata.get("totalPages") or current)
-        return CivitaiSearchResult(
-            items=items,
-            current_page=current,
-            total_pages=total,
-            next_page=current + 1 if current < total else None,
-        )
-
     def _get_json(self, path: str, token: str | None) -> dict[str, Any]:
         headers = {"Accept": "application/json", "User-Agent": "HFDM/2"}
         if token:
@@ -161,11 +116,14 @@ class CivitaiService:
         selected_id = int(selected.get("id") or 0)
         if selected_id < 1:
             raise CivitaiServiceError("Civitai version 缺少 ID")
-        files = self._files(selected)
+        files = [*self._files(selected), *self._example_files(selected)]
         if not files:
             raise CivitaiServiceError("此 Civitai version 沒有可下載檔案", status_code=404)
         versions = [self._version(item) for item in raw_versions if item.get("id")]
-        suggested = [item.path for item in files if item.primary] or [item.path for item in files]
+        downloadable_models = [item for item in files if item.provider_metadata.get("kind") == "model"]
+        suggested = [item.path for item in downloadable_models if item.primary] or [
+            item.path for item in downloadable_models
+        ]
         creator = model.get("creator") or {}
         images = selected.get("images") or []
         preview = images[0].get("url") if images and isinstance(images[0], dict) else None
@@ -224,6 +182,7 @@ class CivitaiService:
                     precision=str(metadata.get("fp")) if metadata.get("fp") else None,
                     scan_status=scan_status or None,
                     provider_metadata={
+                        "kind": "model",
                         "download_url": download_url,
                         "file_type": raw.get("type"),
                         "format": metadata.get("format"),
@@ -234,6 +193,57 @@ class CivitaiService:
             )
         files.sort(key=lambda item: (not item.primary, item.path.casefold()))
         return files
+
+    def _example_files(self, version: dict[str, Any]) -> list[RepoFileInfo]:
+        files: list[RepoFileInfo] = []
+        for index, raw in enumerate(version.get("images") or [], start=1):
+            if not isinstance(raw, dict) or raw.get("type") != "image" or not raw.get("url"):
+                continue
+            url = self._safe_media_url(raw["url"])
+            parsed = urlparse(url)
+            original_name = PurePosixPath(parsed.path).name or f"example-{index}.jpg"
+            suffix = PurePosixPath(original_name).suffix.casefold()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                suffix = ".jpg"
+            identity = str(raw.get("id") or hashlib.sha256(url.encode("utf-8")).hexdigest()[:16])
+            stem = f"{index:02d}-{identity}"
+            files.append(
+                RepoFileInfo(
+                    path=f"examples/{stem}{suffix}",
+                    remote_id=f"image:{identity}",
+                    file_type="Example image",
+                    format=suffix.removeprefix(".").upper(),
+                    provider_metadata={"kind": "example_image", "download_url": url},
+                )
+            )
+            meta = raw.get("meta")
+            if isinstance(meta, dict) and meta:
+                content = json.dumps(
+                    {"civitai_image_url": url, "generation": meta},
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n"
+                encoded = content.encode("utf-8")
+                files.append(
+                    RepoFileInfo(
+                        path=f"examples/{stem}.json",
+                        size=len(encoded),
+                        remote_id=f"metadata:{identity}",
+                        sha256=hashlib.sha256(encoded).hexdigest(),
+                        file_type="Generation metadata",
+                        format="JSON",
+                        provider_metadata={"kind": "generation_metadata", "inline_text": content},
+                    )
+                )
+        return files
+
+    @staticmethod
+    def _safe_media_url(value: Any) -> str:
+        parsed = urlparse(str(value))
+        if parsed.scheme != "https" or parsed.hostname != "image.civitai.com":
+            raise CivitaiServiceError("Civitai 範例圖片來源不受信任")
+        return urlunparse(("https", parsed.netloc, parsed.path, "", parsed.query, ""))
 
     @staticmethod
     def _version(raw: dict[str, Any]) -> SourceVersionInfo:

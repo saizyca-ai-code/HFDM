@@ -144,3 +144,44 @@ def test_download_auth_failure_is_classified_for_ui_recovery(tmp_path: Path) -> 
             lambda event: None,
             opener=forbidden,
         )
+
+
+def test_civitai_example_image_download_discovers_size(tmp_path: Path) -> None:
+    content = b"example-image"
+    events = []
+    download_civitai_file(
+        {
+            "destination": str(tmp_path),
+            "filename": "examples/preview.jpeg",
+            "download_url": "https://image.civitai.com/example/preview.jpeg",
+            "expected_size": 0,
+            "provider_metadata": {"kind": "example_image"},
+            "segments": 2,
+            "token": "must-not-be-sent",
+        },
+        events.append,
+        opener=range_opener(content),
+    )
+    assert (tmp_path / "examples" / "preview.jpeg").read_bytes() == content
+    assert events[-1] == {"type": "progress", "downloaded": len(content), "total": len(content)}
+
+
+def test_civitai_generation_metadata_is_written_without_network(tmp_path: Path) -> None:
+    content = '{"prompt":"hello"}\n'
+    expected = hashlib.sha256(content.encode()).hexdigest()
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("inline metadata must not use the network")
+
+    download_civitai_file(
+        {
+            "destination": str(tmp_path),
+            "filename": "examples/preview.json",
+            "expected_size": len(content.encode()),
+            "expected_sha256": expected,
+            "provider_metadata": {"kind": "generation_metadata", "inline_text": content},
+        },
+        lambda event: None,
+        opener=no_network,
+    )
+    assert (tmp_path / "examples" / "preview.json").read_text() == content

@@ -54,36 +54,6 @@ class SourceVersionInfo(BaseModel):
     created_at: datetime | None = None
 
 
-class CivitaiSearchRequest(BaseModel):
-    query: str | None = Field(default=None, max_length=200)
-    tag: str | None = Field(default=None, max_length=100)
-    username: str | None = Field(default=None, max_length=100)
-    types: list[str] = Field(default_factory=list, max_length=16)
-    base_models: list[str] = Field(default_factory=list, max_length=16)
-    sort: Literal["Highest Rated", "Most Downloaded", "Newest"] = "Most Downloaded"
-    period: Literal["AllTime", "Year", "Month", "Week", "Day"] = "AllTime"
-    page: int = Field(default=1, ge=1)
-    limit: int = Field(default=20, ge=1, le=50)
-    civitai_token: SecretStr | None = None
-
-
-class CivitaiSearchItem(BaseModel):
-    id: int
-    name: str
-    model_type: str | None = None
-    creator: str | None = None
-    latest_version_id: int | None = None
-    base_model: str | None = None
-    preview_url: str | None = None
-
-
-class CivitaiSearchResult(BaseModel):
-    items: list[CivitaiSearchItem]
-    current_page: int = 1
-    total_pages: int = 1
-    next_page: int | None = None
-
-
 class RepoResolution(BaseModel):
     provider: Provider = "huggingface"
     repo_id: str

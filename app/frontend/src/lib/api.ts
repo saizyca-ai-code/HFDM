@@ -19,23 +19,6 @@ export type SourceVersion = {
   created_at?: string | null
 }
 
-export type CivitaiSearchItem = {
-  id: number
-  name: string
-  model_type?: string | null
-  creator?: string | null
-  latest_version_id?: number | null
-  base_model?: string | null
-  preview_url?: string | null
-}
-
-export type CivitaiSearchResult = {
-  items: CivitaiSearchItem[]
-  current_page: number
-  total_pages: number
-  next_page?: number | null
-}
-
 export type RepoResolution = {
   provider: "huggingface" | "civitai"
   repo_id: string
@@ -165,11 +148,6 @@ export const api = {
     request<RepoResolution>("/api/repos/resolve", {
       method: "POST",
       body: JSON.stringify({ source, ...sourceToken(source, token), include_globs: includeGlobs, exclude_globs: excludeGlobs, civitai_version_id: versionId || null }),
-    }),
-  searchCivitai: (filters: { query?: string; tag?: string; username?: string; types?: string[]; base_models?: string[]; sort?: string; period?: string; page?: number }, token = "") =>
-    request<CivitaiSearchResult>("/api/civitai/models/search", {
-      method: "POST",
-      body: JSON.stringify({ ...filters, civitai_token: token || null }),
     }),
   createTask: (source: string, selectedFiles: string[], token: string, versionId?: number) =>
     request<DownloadTask>("/api/tasks", {

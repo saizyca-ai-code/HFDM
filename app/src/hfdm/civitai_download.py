@@ -50,13 +50,19 @@ def download_civitai_file(
         target.relative_to(destination.resolve())
     except ValueError as exc:
         raise CivitaiDownloadError("Civitai target escaped the destination") from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
     expected_size = int(payload.get("expected_size") or 0)
     expected_sha256 = str(payload.get("expected_sha256") or "").casefold() or None
-    download_url = _validate_download_url(str(payload["download_url"]))
+    provider_metadata = payload.get("provider_metadata") or {}
+    source_kind = str(provider_metadata.get("kind") or "model")
+    if source_kind == "generation_metadata":
+        _write_inline_file(target, str(provider_metadata.get("inline_text") or ""), expected_sha256, emit)
+        return
+    download_url = _validate_download_url(str(payload["download_url"]), source_kind)
     token = payload.get("token") or None
+    if source_kind == "example_image":
+        token = None
     segment_count = max(1, min(int(payload.get("segments") or 1), 8))
-    target.parent.mkdir(parents=True, exist_ok=True)
-
     part = target.with_name(f"{target.name}.part")
     meta = target.with_name(f"{target.name}.part.json")
     state = {
@@ -65,7 +71,16 @@ def download_civitai_file(
         "expected_size": expected_size,
         "expected_sha256": expected_sha256,
     }
-    if _read_state(meta) != state:
+    stored_state = _read_state(meta)
+    if (
+        expected_size <= 0
+        and stored_state
+        and stored_state.get("download_url") == download_url
+        and stored_state.get("expected_sha256") == expected_sha256
+    ):
+        expected_size = int(stored_state.get("expected_size") or 0)
+        state["expected_size"] = expected_size
+    if stored_state != state:
         _clear_partial(part, meta)
     _write_state(meta, state)
 
@@ -76,6 +91,7 @@ def download_civitai_file(
         _write_state(meta, state)
     if expected_size <= 0:
         raise CivitaiDownloadError("Civitai server did not provide the file size")
+    emit({"type": "progress", "downloaded": 0, "total": expected_size})
 
     if range_supported and segment_count > 1 and expected_size >= segment_count:
         try:
@@ -270,8 +286,12 @@ def _open_with_refresh(request: Request, opener: Callable[..., Any]) -> Any:
         return opener(request, timeout=60)
 
 
-def _validate_download_url(value: str) -> str:
+def _validate_download_url(value: str, source_kind: str = "model") -> str:
     parsed = urlparse(value)
+    if source_kind == "example_image":
+        if parsed.scheme == "https" and parsed.hostname == "image.civitai.com":
+            return value
+        raise CivitaiDownloadError("Untrusted Civitai example image URL")
     if (
         parsed.scheme != "https"
         or parsed.hostname not in {"civitai.com", "www.civitai.com"}
@@ -279,6 +299,21 @@ def _validate_download_url(value: str) -> str:
     ):
         raise CivitaiDownloadError("Untrusted Civitai download URL")
     return value
+
+
+def _write_inline_file(
+    target: Path,
+    content: str,
+    expected_sha256: str | None,
+    emit: Callable[[dict[str, Any]], None],
+) -> None:
+    encoded = content.encode("utf-8")
+    if expected_sha256 and hashlib.sha256(encoded).hexdigest().casefold() != expected_sha256:
+        raise CivitaiDownloadError("Civitai metadata SHA256 verification failed")
+    temporary = target.with_name(f"{target.name}.part")
+    temporary.write_bytes(encoded)
+    os.replace(temporary, target)
+    emit({"type": "progress", "downloaded": len(encoded), "total": len(encoded)})
 
 
 def _split_ranges(total: int, count: int) -> list[tuple[int, int]]:

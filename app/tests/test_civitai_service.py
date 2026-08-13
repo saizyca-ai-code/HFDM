@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 from hfdm.civitai_service import CivitaiService
-from hfdm.schemas import CivitaiSearchRequest
 
 
 class JsonResponse(io.BytesIO):
@@ -46,7 +45,13 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
                         "downloadUrl": "https://civitai.com/api/download/models/456?type=Model&token=secret",
                     }
                 ],
-                "images": [{"url": "https://image.civitai.com/preview.jpeg"}],
+                "images": [
+                    {
+                        "type": "image",
+                        "url": "https://image.civitai.com/preview.jpeg",
+                        "meta": {"prompt": "a test image", "steps": 20},
+                    }
+                ],
             },
             {"id": 455, "name": "v1", "files": []},
         ],
@@ -64,6 +69,13 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
     assert resolution.display_name == "Example LoRA"
     assert [version.id for version in resolution.versions] == ["456", "455"]
     assert resolution.suggested_files == ["example.safetensors"]
+    assert [item.path for item in resolution.files[1:]] == [
+        "examples/01-128e5f77efbcf4f8.jpeg",
+        "examples/01-128e5f77efbcf4f8.json",
+    ]
+    assert resolution.files[1].provider_metadata["kind"] == "example_image"
+    assert resolution.files[2].provider_metadata["kind"] == "generation_metadata"
+    assert '"prompt": "a test image"' in resolution.files[2].provider_metadata["inline_text"]
     file = resolution.files[0]
     assert file.remote_id == "789"
     assert file.size == 2048
@@ -73,40 +85,3 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
     )
     assert requests[0].get_header("Authorization") == "Bearer civitai_secret"
     assert "civitai_secret" not in resolution.model_dump_json()
-
-
-def test_civitai_search_maps_filters_and_results() -> None:
-    captured = []
-    payload = {
-        "items": [
-            {
-                "id": 123,
-                "name": "Example",
-                "type": "LORA",
-                "creator": {"username": "artist"},
-                "modelVersions": [
-                    {"id": 456, "baseModel": "SDXL 1.0", "images": [{"url": "preview"}]}
-                ],
-            }
-        ],
-        "metadata": {"currentPage": 1, "totalPages": 2},
-    }
-
-    def opener(request, timeout=0):
-        captured.append(request.full_url)
-        return JsonResponse(payload)
-
-    result = CivitaiService(opener).search(
-        CivitaiSearchRequest(
-            query="example",
-            username="artist",
-            types=["LORA"],
-            base_models=["SDXL 1.0"],
-        )
-    )
-
-    assert result.items[0].latest_version_id == 456
-    assert result.next_page == 2
-    assert "query=example" in captured[0]
-    assert "types=LORA" in captured[0]
-    assert "baseModels=SDXL+1.0" in captured[0]

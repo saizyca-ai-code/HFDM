@@ -26,6 +26,9 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
 - Includes an opt-in Model/Dataset benchmark harness under `app/tests/benchmarks/` for balanced, maximum, and HDD Xet profiles.
 - Resolves Civitai model/version URLs and IDs, previews versions and file variants,
   and stores downloads by stable model/version identity.
+- Keeps Hugging Face and Civitai URL workflows separate in the navigation; Civitai
+  versions, precision variants, example images, and available generation metadata
+  are selectable without a separate search index.
 - Supports resumable segmented Civitai transfers with redirect refresh and SHA256
   verification; API tokens remain memory-only.
 

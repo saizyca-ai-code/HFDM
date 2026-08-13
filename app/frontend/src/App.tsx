@@ -16,7 +16,6 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  Search,
   Server,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -33,10 +32,33 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import { api, fileDownloadUrl, type AppSettings, type CivitaiSearchItem, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
+import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
 import { cn, formatBytes, formatEta, percent } from "@/lib/utils"
 
-type Page = "new" | "transfers" | "library" | "settings"
+type Page = "huggingface" | "civitai" | "transfers" | "library" | "settings"
+type DownloadProvider = "huggingface" | "civitai"
+type SourceCategory = "hf-model" | "hf-dataset" | "civitai-model"
+
+const categoryLabels: Record<SourceCategory, string> = {
+  "hf-model": "Hugging Face Model",
+  "hf-dataset": "Hugging Face Dataset",
+  "civitai-model": "Civitai Model",
+}
+
+function sourceCategory(provider: string, repoType: string): SourceCategory {
+  if (provider === "civitai") return "civitai-model"
+  return repoType === "dataset" ? "hf-dataset" : "hf-model"
+}
+
+function SourceBadge({ provider, repoType }: { provider: string; repoType: string }) {
+  const category = sourceCategory(provider, repoType)
+  return <Badge className={category === "civitai-model" ? "border-cyan-400/20 bg-cyan-400/10 text-cyan-300" : category === "hf-dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : "border-sky-400/20 bg-sky-400/10 text-sky-300"}>{categoryLabels[category]}</Badge>
+}
+
+function CategoryTabs({ value, onChange, counts, includeAll = false }: { value: SourceCategory | "all"; onChange: (value: SourceCategory | "all") => void; counts: Record<SourceCategory, number>; includeAll?: boolean }) {
+  const categories = Object.keys(categoryLabels) as SourceCategory[]
+  return <div className="mb-5 flex flex-wrap gap-2">{includeAll && <Button size="sm" variant={value === "all" ? "default" : "secondary"} onClick={() => onChange("all")}>全部</Button>}{categories.map((category) => <Button key={category} size="sm" variant={value === category ? "default" : "secondary"} onClick={() => onChange(category)}>{categoryLabels[category]} <span className="ml-1 text-[10px] opacity-60">{counts[category]}</span></Button>)}</div>
+}
 
 type NewDownloadDraft = {
   source: string
@@ -82,11 +104,12 @@ const availabilityMeta: Record<string, { label: string; className: string }> = {
 }
 
 function App() {
-  const [page, setPage] = useState<Page>("new")
-  const [downloadDraft, setDownloadDraft] = useState<NewDownloadDraft>(() => ({
+  const [page, setPage] = useState<Page>("huggingface")
+  const [hfDraft, setHfDraft] = useState<NewDownloadDraft>(() => ({
     ...emptyDownloadDraft(),
     source: "https://huggingface.co/Comfy-Org/z_image_turbo/tree/main",
   }))
+  const [civitaiDraft, setCivitaiDraft] = useState<NewDownloadDraft>(emptyDownloadDraft)
   const [tasks, setTasks] = useState<DownloadTask[]>([])
   const [library, setLibrary] = useState<LibraryItem[]>([])
   const [isAdmin, setIsAdmin] = useState(false)
@@ -135,7 +158,8 @@ function App() {
           </div>
         </div>
         <nav className="space-y-1">
-          <NavButton active={page === "new"} icon={Plus} label="新增下載" onClick={() => setPage("new")} />
+          <NavButton active={page === "huggingface"} icon={Download} label="從 Hugging Face 下載" onClick={() => setPage("huggingface")} />
+          <NavButton active={page === "civitai"} icon={Box} label="從 Civitai 下載" onClick={() => setPage("civitai")} />
           <NavButton active={page === "transfers"} icon={Activity} label="傳輸任務" count={activeCount} onClick={() => setPage("transfers")} />
           <NavButton active={page === "library"} icon={Library} label="內容庫" onClick={() => setPage("library")} />
           <NavButton active={page === "settings"} icon={SettingsIcon} label="服務設定" onClick={() => setPage("settings")} />
@@ -165,15 +189,17 @@ function App() {
         </header>
 
         <div className="mx-auto max-w-7xl px-4 py-7 md:px-8 md:py-10">
-          {page === "new" && <NewDownload draft={downloadDraft} setDraft={setDownloadDraft} onCreated={() => { setDownloadDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
+          {page === "huggingface" && <NewDownload provider="huggingface" draft={hfDraft} setDraft={setHfDraft} onCreated={() => { setHfDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
+          {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} onCreated={() => { setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
         </div>
       </main>
 
-      <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-4 rounded-2xl border border-white/10 bg-[#0c1219]/95 p-1.5 shadow-2xl backdrop-blur-xl lg:hidden">
-        <MobileNav active={page === "new"} icon={Plus} label="新增" onClick={() => setPage("new")} />
+      <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-2xl border border-white/10 bg-[#0c1219]/95 p-1.5 shadow-2xl backdrop-blur-xl lg:hidden">
+        <MobileNav active={page === "huggingface"} icon={Download} label="HF" onClick={() => setPage("huggingface")} />
+        <MobileNav active={page === "civitai"} icon={Box} label="Civitai" onClick={() => setPage("civitai")} />
         <MobileNav active={page === "transfers"} icon={Activity} label="任務" onClick={() => setPage("transfers")} />
         <MobileNav active={page === "library"} icon={Library} label="內容" onClick={() => setPage("library")} />
         <MobileNav active={page === "settings"} icon={SettingsIcon} label="設定" onClick={() => setPage("settings")} />
@@ -194,20 +220,11 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
   return <div className="mb-7 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><div className="mb-2 text-[10px] font-bold uppercase tracking-[.24em] text-cyan-400/70">{eyebrow}</div><h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">{title}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p></div>{action}</div>
 }
 
-function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; onCreated: () => void }) {
+function NewDownload({ provider, draft, setDraft, onCreated }: { provider: DownloadProvider; draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; onCreated: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState("")
-  const [searchType, setSearchType] = useState("")
-  const [searchBaseModel, setSearchBaseModel] = useState("")
-  const [searchCreator, setSearchCreator] = useState("")
-  const [searchTag, setSearchTag] = useState("")
-  const [searchSort, setSearchSort] = useState("Most Downloaded")
-  const [searchPeriod, setSearchPeriod] = useState("AllTime")
-  const [searchResults, setSearchResults] = useState<CivitaiSearchItem[]>([])
   const { source, token, includeGlobs, excludeGlobs, versionId, repo, selected } = draft
-  const isCivitai = repo?.provider === "civitai" || /civitai\.com|^\s*(?:\d+|models?[:/]|versions?[:/])/i.test(source)
+  const isCivitai = provider === "civitai"
   const selectedBytes = useMemo(() => repo?.files.filter((file) => selected.has(file.path)).reduce((sum, file) => sum + file.size, 0) ?? 0, [repo, selected])
 
   const updateDraft = (values: Partial<NewDownloadDraft>) => {
@@ -218,35 +235,19 @@ function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; 
     setError("")
   }
 
-  const resolve = async (nextVersionId?: number, sourceOverride?: string) => {
+  const resolve = async (nextVersionId?: number) => {
     setBusy(true); setError("")
     try {
-      const nextSource = sourceOverride || source
       const result = await api.resolveRepo(
-        nextSource,
+        source,
         token,
         splitGlobInput(includeGlobs),
         splitGlobInput(excludeGlobs),
         nextVersionId,
       )
-      updateDraft({ source: nextSource, repo: result, versionId: result.provider === "civitai" ? result.commit_hash : "", selected: new Set(result.suggested_files) })
+      if (result.provider !== provider) throw new Error(`此入口只接受 ${isCivitai ? "Civitai model URL" : "Hugging Face Model／Dataset URL"}`)
+      updateDraft({ repo: result, versionId: result.provider === "civitai" ? result.commit_hash : "", selected: new Set(result.suggested_files) })
     } catch (reason) { setError(reason instanceof Error ? reason.message : "讀取 repo 失敗") }
-    finally { setBusy(false) }
-  }
-  const searchCivitai = async () => {
-    setBusy(true); setError("")
-    try {
-      const result = await api.searchCivitai({
-        query: searchQuery || undefined,
-        tag: searchTag || undefined,
-        username: searchCreator || undefined,
-        types: searchType ? [searchType] : [],
-        base_models: searchBaseModel ? [searchBaseModel] : [],
-        sort: searchSort,
-        period: searchPeriod,
-      }, token)
-      setSearchResults(result.items)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "搜尋 Civitai 失敗") }
     finally { setBusy(false) }
   }
   const create = async () => {
@@ -260,21 +261,21 @@ function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; 
   }
 
   return <>
-    <PageHeading eyebrow="New transfer" title="從 Hugging Face 或 Civitai 取得內容" description="解析草稿會在切換 HFDM 分頁時保留於記憶體；HF／Civitai Token 只用於當次操作，不會寫入瀏覽器儲存或伺服器。" action={<Button variant="ghost" onClick={clearDraft} disabled={busy || (!source && !token && !includeGlobs && !excludeGlobs && !repo)}><Trash2 className="size-4" />清除草稿</Button>} />
+    <PageHeading eyebrow={isCivitai ? "Civitai download" : "Hugging Face download"} title={isCivitai ? "從 Civitai 下載模型" : "從 Hugging Face 下載"} description={isCivitai ? "貼上 Civitai model 網址；HFDM 會列出模型系列、目前版本的檔案變體，以及可用的範例圖片與生成資訊。" : "貼上 Hugging Face Model 或 Dataset 網址；解析草稿與 Token 只保留於目前記憶體。"} action={<Button variant="ghost" onClick={clearDraft} disabled={busy || (!source && !token && !includeGlobs && !excludeGlobs && !repo)}><Trash2 className="size-4" />清除草稿</Button>} />
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
       <Card>
-        <CardHeader><h2 className="font-semibold text-white">下載來源</h2><p className="text-xs text-slate-500">支援 Hugging Face Model／Dataset，以及 Civitai model／version URL 或 ID</p></CardHeader>
+        <CardHeader><h2 className="font-semibold text-white">{isCivitai ? "Civitai 模型網址" : "Hugging Face 來源網址"}</h2><p className="text-xs text-slate-500">{isCivitai ? "例如：https://civitai.com/models/620406/...?modelVersionId=3161628" : "支援 Hugging Face Model／Dataset 與 /tree/<revision> 網址"}</p></CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => updateDraft({ source: event.target.value, repo: null, versionId: "" })} placeholder="HF owner/repo 或 Civitai model URL" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button><Button variant="secondary" onClick={() => setSearchOpen(!searchOpen)}><Search className="size-4" />瀏覽 Civitai</Button></div>
+          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => updateDraft({ source: event.target.value, repo: null, versionId: "" })} placeholder={isCivitai ? "貼上 Civitai model URL" : "貼上 Hugging Face owner/repo 或 URL"} onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button></div>
           <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => updateDraft({ token: event.target.value })} placeholder={`${isCivitai ? "Civitai API" : "HF"} Token（選填；只存於記憶體）`} /></div>
-          {searchOpen && <div className="space-y-3 rounded-xl border border-cyan-400/15 bg-cyan-400/[.025] p-4"><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><Input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="模型名稱" /><Input value={searchCreator} onChange={(event) => setSearchCreator(event.target.value)} placeholder="Creator" /><Input value={searchTag} onChange={(event) => setSearchTag(event.target.value)} placeholder="Tag" /><Input value={searchBaseModel} onChange={(event) => setSearchBaseModel(event.target.value)} placeholder="Base model，例如 SDXL 1.0" /><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-300" value={searchType} onChange={(event) => setSearchType(event.target.value)}><option value="">全部類型</option>{["Checkpoint", "LORA", "TextualInversion", "Controlnet", "VAE", "Upscaler"].map((value) => <option key={value}>{value}</option>)}</select><div className="grid grid-cols-2 gap-2"><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-2 text-xs text-slate-300" value={searchSort} onChange={(event) => setSearchSort(event.target.value)}>{["Most Downloaded", "Highest Rated", "Newest"].map((value) => <option key={value}>{value}</option>)}</select><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-2 text-xs text-slate-300" value={searchPeriod} onChange={(event) => setSearchPeriod(event.target.value)}>{["AllTime", "Year", "Month", "Week", "Day"].map((value) => <option key={value}>{value}</option>)}</select></div></div><div className="flex justify-end"><Button size="sm" onClick={() => void searchCivitai()} disabled={busy}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}搜尋</Button></div>{searchResults.length > 0 && <div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2">{searchResults.map((item) => <button key={item.id} onClick={() => void resolve(item.latest_version_id || undefined, `model:${item.id}`)} className="flex items-center gap-3 rounded-lg border border-white/[.06] bg-[#0a1016] p-3 text-left hover:border-cyan-400/20"><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-200">{item.name}</div><div className="mt-1 truncate text-[10px] text-slate-600">{item.model_type || "Model"}{item.base_model ? ` · ${item.base_model}` : ""}{item.creator ? ` · ${item.creator}` : ""}</div></div><Download className="size-4 shrink-0 text-cyan-400" /></button>)}</div>}</div>}
           {!isCivitai && <><div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => updateDraft({ includeGlobs: event.target.value })} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => updateDraft({ excludeGlobs: event.target.value })} placeholder="Exclude glob，例如 data/test/**" /></div><div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div></>}
           {error && <div className="flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
           {repo && <div className="space-y-4 pt-2">
             <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.display_name || repo.repo_id}</Badge><Badge>{repo.provider === "civitai" ? "Civitai" : "Hugging Face"}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.version_name || repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
-            {repo.provider === "civitai" && repo.versions.length > 0 && <label className="block rounded-lg border border-white/[.07] bg-white/[.025] p-3 text-xs text-slate-400"><span className="mb-2 block font-medium text-slate-300">Model version</span><select className="h-10 w-full rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-200" value={versionId} onChange={(event) => { const next = event.target.value; updateDraft({ versionId: next }); void resolve(Number(next)) }}>{repo.versions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.base_model ? ` · ${version.base_model}` : ""}</option>)}</select></label>}
+            {repo.provider === "civitai" && repo.versions.length > 0 && <label className="block rounded-lg border border-white/[.07] bg-white/[.025] p-3 text-xs text-slate-400"><span className="mb-1 block font-medium text-slate-300">模型系列／版本</span><span className="mb-3 block text-[11px] text-slate-600">切換後會重新列出該版本實際提供的精度與格式檔案。</span><select aria-label="模型系列／版本" className="h-10 w-full rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-200" value={versionId} onChange={(event) => { const next = event.target.value; updateDraft({ versionId: next }); void resolve(Number(next)) }}>{repo.versions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.base_model ? ` · ${version.base_model}` : ""}</option>)}</select></label>}
             {repo.provider === "civitai" && <div className="rounded-lg border border-cyan-400/15 bg-cyan-400/[.04] p-3 text-xs leading-5 text-slate-400">{String(repo.provider_metadata.model_type || "Model")}{repo.provider_metadata.base_model ? ` · ${String(repo.provider_metadata.base_model)}` : ""}{repo.provider_metadata.creator ? ` · by ${String(repo.provider_metadata.creator)}` : ""}。完成時會驗證 Civitai 提供的 SHA256。</div>}
             {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
+            {repo.provider === "civitai" && <div className="text-xs font-medium text-slate-300">此版本的檔案變體與附加內容</div>}
             <FileTree files={repo.files} selected={selected} onChange={(next) => updateDraft({ selected: next })} />
             <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
           </div>}
@@ -298,9 +299,17 @@ function MetricCard({ icon: Icon, label, value, note }: { icon: typeof Archive; 
 }
 
 function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
+  const [category, setCategory] = useState<SourceCategory | "all">("all")
   const active = tasks.filter((task) => task.status !== "completed" && task.status !== "cancelled")
+  const counts = useMemo(() => ({
+    "hf-model": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-model").length,
+    "hf-dataset": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-dataset").length,
+    "civitai-model": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "civitai-model").length,
+  }), [tasks])
+  const visible = category === "all" ? tasks : tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === category)
   return <><PageHeading eyebrow="Transfers" title="下載任務" description="即時查看服務端取得進度。暫停會停止排程並終止正在執行的檔案 worker。" action={<div className="flex items-center gap-2 text-xs text-slate-500"><CircleGauge className="size-4 text-cyan-400" />{active.length} active</div>} />
-    <div className="space-y-4">{tasks.length ? tasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="尚無下載任務" text="從「新增下載」解析第一個 Hugging Face 或 Civitai 來源。" />}</div>
+    <CategoryTabs value={category} onChange={setCategory} counts={counts} includeAll />
+    <div className="space-y-4">{visible.length ? visible.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
   </>
 }
 
@@ -368,7 +377,7 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
     <div className="p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-center">
         <div className="grid size-11 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-[#0a1016]"><Box className="size-5 text-cyan-400/75" /></div>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.display_name || task.repo_id}</h3><Badge className={meta.className}>Transfer: {meta.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.provider} / {task.repo_type}</span><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.display_name || task.repo_id}</h3><SourceBadge provider={task.provider} repoType={task.repo_type} /><Badge className={meta.className}>Transfer: {meta.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
         {isAdmin && <div className="flex items-center gap-1.5">
           <Button variant="secondary" size="sm" disabled={busy} onClick={openEditor}><SettingsIcon className="size-3.5" />編輯</Button>
           {["queued", "downloading"].includes(task.status) && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void command("pause")}><Pause className="size-3.5" />暫停</Button>}
@@ -403,6 +412,7 @@ function FileStatus({ status }: { status: string }) {
 }
 
 function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmin: boolean; refresh: () => Promise<void> }) {
+  const [category, setCategory] = useState<SourceCategory>("hf-model")
   const [scanning, setScanning] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
   const [error, setError] = useState("")
@@ -425,13 +435,20 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     catch (reason) { setError(reason instanceof Error ? reason.message : "重新下載失敗") }
     finally { setRestoringId(null) }
   }
-  return <><PageHeading eyebrow="Content library" title="Model／Dataset 與本機狀態" description="Hugging Face Model／Dataset 與 Civitai version identity 分開；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
+  const counts = useMemo(() => ({
+    "hf-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-model").length,
+    "hf-dataset": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-dataset").length,
+    "civitai-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").length,
+  }), [items])
+  const visible = items.filter((item) => sourceCategory(item.provider, item.repo_type) === category)
+  return <><PageHeading eyebrow="Content library" title="內容庫與本機狀態" description="Hugging Face Model、Hugging Face Dataset 與 Civitai Model 分類管理；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
+    <CategoryTabs value={category} onChange={(value) => value !== "all" && setCategory(value)} counts={counts} />
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
-    <div className="grid gap-4 md:grid-cols-2">{items.length ? items.map((item) => {
+    <div className="grid gap-4 md:grid-cols-2">{visible.length ? visible.map((item) => {
       const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
       const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
-      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{item.provider} / {item.repo_type} / {item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
-    }) : <div className="md:col-span-2"><EmptyState icon={Library} title="內容庫還是空的" text="至少完成一個 Model 或 Dataset 檔案後，實體內容會聚合顯示在這裡。" /></div>}</div>
+      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+    }) : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }
 

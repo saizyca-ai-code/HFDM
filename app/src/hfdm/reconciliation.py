@@ -96,7 +96,7 @@ class DownloadReconciler:
         stat = target.stat()
         observation["observed_size"] = stat.st_size
         observation["observed_mtime_ns"] = stat.st_mtime_ns
-        if stat.st_size != int(file["expected_size"]):
+        if int(file["expected_size"]) > 0 and stat.st_size != int(file["expected_size"]):
             observation["local_status"] = "changed"
             return observation
 

@@ -18,8 +18,6 @@ from .hf_service import HuggingFaceService
 from .repo_ref import InvalidRepoReference
 from .schemas import (
     AppSettingsView,
-    CivitaiSearchRequest,
-    CivitaiSearchResult,
     CreateTaskRequest,
     IdentityView,
     InspectTaskRequest,
@@ -101,13 +99,6 @@ def create_router(
             raise HTTPException(status_code=code if code in {401, 403, 404} else 502, detail=detail) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"讀取 Hugging Face repo 失敗：{exc}") from exc
-
-    @router.post("/civitai/models/search", response_model=CivitaiSearchResult)
-    def search_civitai(payload: CivitaiSearchRequest) -> CivitaiSearchResult:
-        try:
-            return civitai.search(payload, token_value(payload.civitai_token))
-        except CivitaiServiceError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @router.post("/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: CreateTaskRequest) -> dict:

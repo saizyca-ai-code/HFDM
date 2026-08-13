@@ -630,6 +630,38 @@ class Database:
                 (*record_values.values(), file_id),
             )
 
+    def update_file_size(self, file_id: str, size: int) -> None:
+        with self._write_lock, self.connect() as conn:
+            row = conn.execute("SELECT task_id FROM task_files WHERE id=?", (file_id,)).fetchone()
+            if not row:
+                return
+            task_id = str(row["task_id"])
+            conn.execute("UPDATE task_files SET size=? WHERE id=?", (size, file_id))
+            conn.execute(
+                "UPDATE download_record_files SET expected_size=? WHERE id=?",
+                (size, file_id),
+            )
+            total = int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(size), 0) FROM task_files WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+            now = utc_now()
+            conn.execute(
+                "UPDATE tasks SET total_bytes=?, updated_at=? WHERE id=?",
+                (total, now, task_id),
+            )
+            conn.execute(
+                "UPDATE download_records SET total_bytes=?, updated_at=? WHERE id=?",
+                (total, now, task_id),
+            )
+            conn.execute(
+                "UPDATE download_attempts SET total_bytes=? WHERE id=("
+                "SELECT id FROM download_attempts WHERE record_id=? ORDER BY attempt_number DESC LIMIT 1)",
+                (total, task_id),
+            )
+
     def bulk_file_status(self, task_id: str, from_statuses: list[str], status: str) -> None:
         marks = ",".join("?" for _ in from_statuses)
         with self._write_lock, self.connect() as conn:
