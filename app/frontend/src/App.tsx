@@ -31,6 +31,7 @@ import { FileTree } from "@/components/file-tree"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
@@ -69,6 +70,28 @@ type NewDownloadDraft = {
   versionId: string
   repo: RepoResolution | null
   selected: Set<string>
+}
+
+type CreationBehavior = {
+  clearAfterCreate: boolean
+  openTransfersAfterCreate: boolean
+}
+
+const defaultCreationBehavior: CreationBehavior = {
+  clearAfterCreate: false,
+  openTransfersAfterCreate: false,
+}
+
+function storedCreationBehavior(): CreationBehavior {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("hfdm.creation-behavior") || "{}")
+    return {
+      clearAfterCreate: stored.clearAfterCreate === true,
+      openTransfersAfterCreate: stored.openTransfersAfterCreate === true,
+    }
+  } catch {
+    return defaultCreationBehavior
+  }
 }
 
 function emptyDownloadDraft(): NewDownloadDraft {
@@ -111,6 +134,7 @@ function App() {
     source: "https://huggingface.co/Comfy-Org/z_image_turbo/tree/main",
   }))
   const [civitaiDraft, setCivitaiDraft] = useState<NewDownloadDraft>(emptyDownloadDraft)
+  const [creationBehavior, setCreationBehavior] = useState<CreationBehavior>(storedCreationBehavior)
   const [tasks, setTasks] = useState<DownloadTask[]>([])
   const [library, setLibrary] = useState<LibraryItem[]>([])
   const [isAdmin, setIsAdmin] = useState(false)
@@ -143,6 +167,10 @@ function App() {
       window.clearTimeout(timer)
     }
   }, [refreshTasks])
+
+  useEffect(() => {
+    window.localStorage.setItem("hfdm.creation-behavior", JSON.stringify(creationBehavior))
+  }, [creationBehavior])
 
   const activeCount = tasks.filter((task) => ["queued", "downloading", "pausing"].includes(task.status)).length
 
@@ -190,8 +218,8 @@ function App() {
         </header>
 
         <div className="mx-auto max-w-7xl px-4 py-7 md:px-8 md:py-10">
-          {page === "huggingface" && <NewDownload provider="huggingface" draft={hfDraft} setDraft={setHfDraft} onCreated={() => { setHfDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
-          {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} onCreated={() => { setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); setPage("transfers") }} />}
+          {page === "huggingface" && <NewDownload provider="huggingface" draft={hfDraft} setDraft={setHfDraft} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setHfDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
+          {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
@@ -221,9 +249,10 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
   return <div className="mb-7 flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><div className="mb-2 text-[10px] font-bold uppercase tracking-[.24em] text-cyan-400/70">{eyebrow}</div><h1 className="text-2xl font-semibold tracking-tight text-white md:text-3xl">{title}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">{description}</p></div>{action}</div>
 }
 
-function NewDownload({ provider, draft, setDraft, onCreated }: { provider: DownloadProvider; draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; onCreated: () => void }) {
+function NewDownload({ provider, draft, setDraft, creationBehavior, setCreationBehavior, onCreated }: { provider: DownloadProvider; draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; creationBehavior: CreationBehavior; setCreationBehavior: React.Dispatch<React.SetStateAction<CreationBehavior>>; onCreated: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [createdNotice, setCreatedNotice] = useState("")
   const { source, token, includeGlobs, excludeGlobs, versionId, repo, selected } = draft
   const isCivitai = provider === "civitai"
   const selectedBytes = useMemo(() => repo?.files.filter((file) => selected.has(file.path)).reduce((sum, file) => sum + file.size, 0) ?? 0, [repo, selected])
@@ -234,10 +263,11 @@ function NewDownload({ provider, draft, setDraft, onCreated }: { provider: Downl
   const clearDraft = () => {
     setDraft(emptyDownloadDraft())
     setError("")
+    setCreatedNotice("")
   }
 
   const resolve = async (nextVersionId?: number) => {
-    setBusy(true); setError("")
+    setBusy(true); setError(""); setCreatedNotice("")
     try {
       const result = await api.resolveRepo(
         source,
@@ -253,9 +283,10 @@ function NewDownload({ provider, draft, setDraft, onCreated }: { provider: Downl
   }
   const create = async () => {
     if (!repo || !selected.size) return
-    setBusy(true); setError("")
+    setBusy(true); setError(""); setCreatedNotice("")
     try {
       await api.createTask(source, [...selected], token, repo.provider === "civitai" ? Number(versionId) : undefined)
+      setCreatedNotice(creationBehavior.clearAfterCreate ? "下載任務已建立；目前設定已依偏好清除。" : "下載任務已建立；目前解析與選檔設定已保留。")
       onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : "建立任務失敗") }
     finally { setBusy(false) }
@@ -271,6 +302,7 @@ function NewDownload({ provider, draft, setDraft, onCreated }: { provider: Downl
           <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => updateDraft({ token: event.target.value })} placeholder={`${isCivitai ? "Civitai API" : "HF"} Token（選填；只存於記憶體）`} /></div>
           {!isCivitai && <><div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => updateDraft({ includeGlobs: event.target.value })} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => updateDraft({ excludeGlobs: event.target.value })} placeholder="Exclude glob，例如 data/test/**" /></div><div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div></>}
           {error && <div className="flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
+          {createdNotice && <div className="flex items-start gap-2 rounded-lg border border-emerald-400/15 bg-emerald-400/[.07] p-3 text-sm text-emerald-300"><CheckCircle2 className="mt-0.5 size-4 shrink-0" />{createdNotice}</div>}
           {repo && <div className="space-y-4 pt-2">
             <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.display_name || repo.repo_id}</Badge><Badge>{repo.provider === "civitai" ? "Civitai" : "Hugging Face"}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.version_name || repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
             {repo.provider === "civitai" && repo.versions.length > 0 && <label className="block rounded-lg border border-white/[.07] bg-white/[.025] p-3 text-xs text-slate-400"><span className="mb-1 block font-medium text-slate-300">模型系列／版本</span><span className="mb-3 block text-[11px] text-slate-600">切換後會重新列出該版本實際提供的精度與格式檔案。</span><select aria-label="模型系列／版本" className="h-10 w-full rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-200" value={versionId} onChange={(event) => { const next = event.target.value; updateDraft({ versionId: next }); void resolve(Number(next)) }}>{repo.versions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.base_model ? ` · ${version.base_model}` : ""}</option>)}</select></label>}
@@ -278,7 +310,14 @@ function NewDownload({ provider, draft, setDraft, onCreated }: { provider: Downl
             {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
             {repo.provider === "civitai" && <div className="text-xs font-medium text-slate-300">此版本的檔案變體與附加內容</div>}
             <FileTree files={repo.files} selected={selected} onChange={(next) => updateDraft({ selected: next })} />
-            <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
+            <div className="space-y-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4">
+              <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
+              <div className="flex flex-wrap gap-x-5 gap-y-2 border-t border-white/[.05] pt-3 text-xs text-slate-400">
+                <label className="flex cursor-pointer items-center gap-2"><Checkbox checked={creationBehavior.clearAfterCreate} onCheckedChange={(checked) => setCreationBehavior((current) => ({ ...current, clearAfterCreate: checked }))} />建立後清除目前設定</label>
+                <label className="flex cursor-pointer items-center gap-2"><Checkbox checked={creationBehavior.openTransfersAfterCreate} onCheckedChange={(checked) => setCreationBehavior((current) => ({ ...current, openTransfersAfterCreate: checked }))} />建立後前往傳輸任務</label>
+                <span className="text-slate-600">偏好會保留；Token 與解析內容仍只存於目前記憶體。</span>
+              </div>
+            </div>
           </div>}
         </CardContent>
       </Card>
