@@ -24,12 +24,14 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
         "id": 123,
         "name": "Example LoRA",
         "type": "LORA",
+        "tags": ["style", "character"],
         "creator": {"username": "artist"},
         "modelVersions": [
             {
                 "id": 456,
                 "name": "v2",
                 "baseModel": "SDXL 1.0",
+                "baseModelType": "Standard",
                 "trainedWords": ["example"],
                 "files": [
                     {
@@ -67,6 +69,10 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
     assert resolution.repo_id == "models/123"
     assert resolution.commit_hash == "456"
     assert resolution.display_name == "Example LoRA"
+    assert resolution.provider_metadata["model_type"] == "LORA"
+    assert resolution.provider_metadata["base_model"] == "SDXL 1.0"
+    assert resolution.provider_metadata["base_model_type"] == "Standard"
+    assert resolution.provider_metadata["tags"] == ["style", "character"]
     assert [version.id for version in resolution.versions] == ["456", "455"]
     assert resolution.suggested_files == ["example.safetensors"]
     assert [item.path for item in resolution.files[1:]] == [
@@ -83,5 +89,16 @@ def test_civitai_model_resolves_versions_files_and_stable_metadata() -> None:
     assert file.provider_metadata["download_url"] == (
         "https://civitai.com/api/download/models/456?type=Model"
     )
+    assert file.provider_metadata["comfyui_folder"] == "loras"
+    assert file.provider_metadata["comfyui_path"] == "ComfyUI/models/loras"
     assert requests[0].get_header("Authorization") == "Bearer civitai_secret"
     assert "civitai_secret" not in resolution.model_dump_json()
+
+
+def test_file_role_overrides_page_model_type_for_comfyui_folder() -> None:
+    service = CivitaiService()
+
+    assert service._comfyui_folder("Diffusion Model", "Checkpoint") == "diffusion_models"
+    assert service._comfyui_folder("Text Encoder", "Checkpoint") == "text_encoders"
+    assert service._comfyui_folder("Model", "Checkpoint") == "checkpoints"
+    assert service._comfyui_folder("Model", "LORA") == "loras"

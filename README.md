@@ -31,6 +31,9 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
   are selectable without a separate search index.
 - Supports resumable segmented Civitai transfers with redirect refresh and SHA256
   verification; API tokens remain memory-only.
+- Preserves Civitai model type, base model, tags, and per-file roles. The content
+  library can search and filter this metadata and recommends the matching
+  `ComfyUI/models/` folder for each downloaded model file.
 
 ## Requirements
 

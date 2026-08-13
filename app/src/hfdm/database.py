@@ -450,6 +450,7 @@ class Database:
                             "size": row["expected_size"],
                             "local_status": row["local_status"],
                             "observed_size": row["observed_size"],
+                            "provider_metadata": self._json_object(row["provider_metadata"]),
                         }
                         current = files_by_path.get(row["path"])
                         if current is None or local_priority.get(candidate["local_status"], 0) > local_priority.get(current["local_status"], 0):
@@ -497,6 +498,7 @@ class Database:
                         "total_bytes": sum(int(file["size"]) for file in files),
                         "requires_token": any(bool(record["requires_token"]) for record in group_records),
                         "display_name": latest["display_name"],
+                        "provider_metadata": self._json_object(latest["provider_metadata"]),
                         "restore_record_ids": sorted(restore_record_ids),
                         "files": files,
                         "updated_at": latest["updated_at"],

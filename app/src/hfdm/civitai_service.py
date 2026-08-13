@@ -116,7 +116,8 @@ class CivitaiService:
         selected_id = int(selected.get("id") or 0)
         if selected_id < 1:
             raise CivitaiServiceError("Civitai version 缺少 ID")
-        files = [*self._files(selected), *self._example_files(selected)]
+        model_type = str(model.get("type") or "") or None
+        files = [*self._files(selected, model_type), *self._example_files(selected)]
         if not files:
             raise CivitaiServiceError("此 Civitai version 沒有可下載檔案", status_code=404)
         versions = [self._version(item) for item in raw_versions if item.get("id")]
@@ -143,8 +144,10 @@ class CivitaiService:
             provider_metadata={
                 "model_id": model_id,
                 "version_id": selected_id,
-                "model_type": model.get("type"),
+                "model_type": model_type,
                 "base_model": selected.get("baseModel"),
+                "base_model_type": selected.get("baseModelType"),
+                "tags": [str(tag) for tag in model.get("tags") or [] if tag],
                 "creator": creator.get("username") if isinstance(creator, dict) else None,
                 "trained_words": selected.get("trainedWords") or [],
                 "preview_url": preview,
@@ -152,7 +155,7 @@ class CivitaiService:
             },
         )
 
-    def _files(self, version: dict[str, Any]) -> list[RepoFileInfo]:
+    def _files(self, version: dict[str, Any], model_type: str | None) -> list[RepoFileInfo]:
         files: list[RepoFileInfo] = []
         used_paths: set[str] = set()
         for raw in version.get("files") or []:
@@ -170,6 +173,7 @@ class CivitaiService:
             )
             scan_parts = [raw.get("virusScanResult"), raw.get("pickleScanResult")]
             scan_status = " / ".join(str(item) for item in scan_parts if item)
+            comfyui_folder = self._comfyui_folder(raw.get("type"), model_type)
             files.append(
                 RepoFileInfo(
                     path=path,
@@ -188,11 +192,63 @@ class CivitaiService:
                         "format": metadata.get("format"),
                         "precision": metadata.get("fp"),
                         "size_variant": metadata.get("size"),
+                        "comfyui_folder": comfyui_folder,
+                        "comfyui_path": (
+                            f"ComfyUI/models/{comfyui_folder}" if comfyui_folder else None
+                        ),
                     },
                 )
             )
         files.sort(key=lambda item: (not item.primary, item.path.casefold()))
         return files
+
+    @staticmethod
+    def _comfyui_folder(file_type: Any, model_type: str | None) -> str | None:
+        """Map Civitai metadata to ComfyUI's model folder names.
+
+        A concrete file role is more reliable than the model page type. Civitai can,
+        for example, classify a model as a Checkpoint while publishing Diffusion
+        Model files. Generic ``Model`` roles fall back to the page-level type.
+        """
+
+        role = "".join(character for character in str(file_type or "").casefold() if character.isalnum())
+        role_folders = {
+            "diffusionmodel": "diffusion_models",
+            "unet": "diffusion_models",
+            "textencoder": "text_encoders",
+            "clip": "text_encoders",
+            "vae": "vae",
+            "controlnet": "controlnet",
+            "controlnetmodel": "controlnet",
+            "t2iadapter": "controlnet",
+            "lora": "loras",
+            "locon": "loras",
+            "dora": "loras",
+            "embedding": "embeddings",
+            "textualinversion": "embeddings",
+            "upscaler": "upscale_models",
+            "upscalemodel": "upscale_models",
+            "checkpoint": "checkpoints",
+            "prunedmodel": "checkpoints",
+        }
+        if role in role_folders:
+            return role_folders[role]
+
+        category = "".join(
+            character for character in str(model_type or "").casefold() if character.isalnum()
+        )
+        category_folders = {
+            "checkpoint": "checkpoints",
+            "lora": "loras",
+            "locon": "loras",
+            "dora": "loras",
+            "textualinversion": "embeddings",
+            "embedding": "embeddings",
+            "vae": "vae",
+            "controlnet": "controlnet",
+            "upscaler": "upscale_models",
+        }
+        return category_folders.get(category)
 
     def _example_files(self, version: dict[str, Any]) -> list[RepoFileInfo]:
         files: list[RepoFileInfo] = []

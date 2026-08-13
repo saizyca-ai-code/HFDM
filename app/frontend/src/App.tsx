@@ -16,6 +16,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Server,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -411,8 +412,40 @@ function FileStatus({ status }: { status: string }) {
   return <span className="size-2 shrink-0 rounded-full bg-slate-700" />
 }
 
+function metadataText(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key]
+  return typeof value === "string" ? value : ""
+}
+
+function metadataList(metadata: Record<string, unknown>, key: string): string[] {
+  const value = metadata[key]
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : []
+}
+
+function CivitaiLibraryMetadata({ item, onTag }: { item: LibraryItem; onTag: (tag: string) => void }) {
+  const tags = metadataList(item.provider_metadata, "tags")
+  const modelType = metadataText(item.provider_metadata, "model_type")
+  const baseModel = metadataText(item.provider_metadata, "base_model")
+  const baseModelType = metadataText(item.provider_metadata, "base_model_type")
+  const creator = metadataText(item.provider_metadata, "creator")
+  const destinations = item.files.flatMap((file) => {
+    const path = metadataText(file.provider_metadata, "comfyui_path")
+    return path ? [{ file: file.path, path }] : []
+  })
+  return <div className="mb-3 space-y-2 rounded-lg border border-cyan-400/10 bg-cyan-400/[.025] p-3 text-xs">
+    <div className="flex flex-wrap gap-1.5">{modelType && <Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{modelType}</Badge>}{baseModel && <Badge>Base: {baseModel}{baseModelType ? ` · ${baseModelType}` : ""}</Badge>}{creator && <Badge>by {creator}</Badge>}</div>
+    {tags.length > 0 && <div className="flex flex-wrap gap-1.5">{tags.map((tag) => <button key={tag} type="button" onClick={() => onTag(tag)} className="rounded-full border border-white/[.07] bg-white/[.035] px-2 py-0.5 text-[10px] text-slate-400 hover:border-cyan-400/30 hover:text-cyan-300">#{tag}</button>)}</div>}
+    {destinations.length > 0 && <div className="space-y-1 border-t border-white/[.05] pt-2"><div className="text-[10px] uppercase tracking-wider text-slate-600">ComfyUI 建議放置位置</div>{destinations.map((destination) => <div key={`${destination.file}-${destination.path}`} className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto]"><span className="truncate text-slate-500">{destination.file}</span><code className="text-cyan-300">{destination.path}</code></div>)}</div>}
+  </div>
+}
+
 function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmin: boolean; refresh: () => Promise<void> }) {
   const [category, setCategory] = useState<SourceCategory>("hf-model")
+  const [query, setQuery] = useState("")
+  const [modelType, setModelType] = useState("")
+  const [baseModel, setBaseModel] = useState("")
+  const [tag, setTag] = useState("")
+  const [comfyuiFolder, setComfyuiFolder] = useState("")
   const [scanning, setScanning] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
   const [error, setError] = useState("")
@@ -440,14 +473,54 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     "hf-dataset": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-dataset").length,
     "civitai-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").length,
   }), [items])
-  const visible = items.filter((item) => sourceCategory(item.provider, item.repo_type) === category)
+  const civitaiItems = useMemo(() => items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model"), [items])
+  const filterOptions = useMemo(() => ({
+    modelTypes: [...new Set(civitaiItems.map((item) => metadataText(item.provider_metadata, "model_type")).filter(Boolean))].sort(),
+    baseModels: [...new Set(civitaiItems.map((item) => metadataText(item.provider_metadata, "base_model")).filter(Boolean))].sort(),
+    tags: [...new Set(civitaiItems.flatMap((item) => metadataList(item.provider_metadata, "tags")))].sort(),
+    folders: [...new Set(civitaiItems.flatMap((item) => item.files.map((file) => metadataText(file.provider_metadata, "comfyui_folder")).filter(Boolean)))].sort(),
+  }), [civitaiItems])
+  const visible = items.filter((item) => {
+    if (sourceCategory(item.provider, item.repo_type) !== category) return false
+    const metadata = item.provider_metadata
+    const tags = metadataList(metadata, "tags")
+    const folders = item.files.map((file) => metadataText(file.provider_metadata, "comfyui_folder")).filter(Boolean)
+    const searchable = [item.display_name, item.repo_id, metadataText(metadata, "creator"), metadataText(metadata, "model_type"), metadataText(metadata, "base_model"), ...tags, ...folders].filter(Boolean).join(" ").toLocaleLowerCase()
+    const normalizedQuery = query.trim().toLocaleLowerCase()
+    if (normalizedQuery && !searchable.includes(normalizedQuery)) return false
+    if (category === "civitai-model") {
+      if (modelType && metadataText(metadata, "model_type") !== modelType) return false
+      if (baseModel && metadataText(metadata, "base_model") !== baseModel) return false
+      if (tag && !tags.includes(tag)) return false
+      if (comfyuiFolder && !folders.includes(comfyuiFolder)) return false
+    }
+    return true
+  })
   return <><PageHeading eyebrow="Content library" title="內容庫與本機狀態" description="Hugging Face Model、Hugging Face Dataset 與 Civitai Model 分類管理；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
     <CategoryTabs value={category} onChange={(value) => value !== "all" && setCategory(value)} counts={counts} />
+    <div className="mb-5 rounded-xl border border-white/[.06] bg-white/[.02] p-3">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-600" />
+        <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋名稱、作者、模型類型、base model、標籤或 ComfyUI 目錄" />
+      </div>
+      {category === "civitai-model" && <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        {[
+          [modelType, setModelType, "全部模型類型", filterOptions.modelTypes],
+          [baseModel, setBaseModel, "全部 Base Model", filterOptions.baseModels],
+          [tag, setTag, "全部標籤", filterOptions.tags],
+          [comfyuiFolder, setComfyuiFolder, "全部 ComfyUI 目錄", filterOptions.folders],
+        ].map(([value, setter, label, options]) => <select key={String(label)} value={String(value)} onChange={(event) => (setter as (value: string) => void)(event.target.value)} className="h-9 rounded-md border border-white/10 bg-[#0c131b] px-3 text-xs text-slate-300 outline-none focus:border-cyan-400/40">
+          <option value="">{String(label)}</option>
+          {(options as string[]).map((option) => <option key={option} value={option}>{option}</option>)}
+        </select>)}
+        <Button variant="secondary" onClick={() => { setQuery(""); setModelType(""); setBaseModel(""); setTag(""); setComfyuiFolder("") }}>清除篩選</Button>
+      </div>}
+    </div>
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
     <div className="grid gap-4 md:grid-cols-2">{visible.length ? visible.map((item) => {
       const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
       const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
-      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent>{item.provider === "civitai" && <CivitaiLibraryMetadata item={item} onTag={setTag} />}<div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
     }) : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }

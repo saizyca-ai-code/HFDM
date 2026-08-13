@@ -95,6 +95,7 @@ export type LibraryFile = {
   size: number
   local_status: "available" | "partial" | "moved" | "changed" | "unknown"
   observed_size?: number | null
+  provider_metadata: Record<string, unknown>
 }
 
 export type LibraryItem = {
@@ -112,6 +113,7 @@ export type LibraryItem = {
   total_bytes: number
   requires_token: boolean
   display_name?: string | null
+  provider_metadata: Record<string, unknown>
   restore_record_ids: string[]
   files: LibraryFile[]
 }

@@ -161,6 +161,7 @@ class LibraryFileView(BaseModel):
     size: int
     local_status: LocalAvailability
     observed_size: int | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class LibraryItemView(BaseModel):
@@ -178,6 +179,7 @@ class LibraryItemView(BaseModel):
     total_bytes: int
     requires_token: bool
     display_name: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
     restore_record_ids: list[str] = Field(default_factory=list)
     files: list[LibraryFileView] = Field(default_factory=list)
 
