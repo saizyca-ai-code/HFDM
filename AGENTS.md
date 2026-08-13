@@ -61,3 +61,11 @@
 - Use optional native `tags` only for secondary cross-cutting concerns that do not fit the controlled primary classification. Do not duplicate `task type` or `component` in tags.
 - If a new status, task type, component, owner, document type, complexity value, or naming convention is necessary, update `Attribute Items.md` in the same task and explain the addition in the task record.
 - Explicit user instructions override this workflow. If Obsidian or its CLI is unavailable, report it instead of silently omitting the durable record.
+
+## Session handoff
+
+- Follow `_Habits/Collaboration settings.md#Session 邊界與交接` when recommending a new session or preparing handoff text.
+- Treat Git and Obsidian as the source of truth. Before handoff, update the active Task／Plan with current results, verification, decisions, blockers, and the next executable step.
+- Produce the concise handoff template from the collaboration settings; do not paste a transcript summary or repeat information already preserved in linked records.
+- Prefer a new session at a completed Task／Phase or a clear change of work area. Context compaction alone does not require a new session.
+- If the worktree is clean, provide only the latest commit. Include per-file details only for necessary handoff of uncommitted work.
