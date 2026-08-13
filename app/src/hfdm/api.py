@@ -120,6 +120,17 @@ def create_router(
     def list_library() -> list[dict]:
         return db.list_library_items()
 
+    @router.post(
+        "/library/{record_id}/open-folder",
+        dependencies=[Depends(require_admin)],
+    )
+    def open_library_folder(record_id: str, scope: str = "version") -> dict[str, bool]:
+        try:
+            manager.open_task_folder(record_id, scope)
+            return {"opened": True}
+        except DownloadManagerError as exc:
+            raise command_error(exc) from exc
+
     @router.get("/tasks/{task_id}", response_model=TaskView)
     def get_task(task_id: str) -> dict:
         task = db.get_task(task_id)

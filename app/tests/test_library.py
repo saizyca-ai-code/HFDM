@@ -120,6 +120,27 @@ def test_library_api_returns_aggregated_items(tmp_path: Path) -> None:
     assert response.json()[0]["history_count"] == 2
 
 
+def test_open_library_folder_requires_local_admin(tmp_path: Path, monkeypatch) -> None:
+    paths = make_paths(tmp_path)
+    app = create_app(paths)
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app.state.manager,
+        "open_task_folder",
+        lambda record_id, scope: calls.append((record_id, scope)),
+    )
+
+    local = TestClient(app, client=("127.0.0.1", 50000))
+    visitor = TestClient(app, client=("192.168.1.20", 50000))
+    opened = local.post("/api/library/record-1/open-folder?scope=source")
+    forbidden = visitor.post("/api/library/record-1/open-folder?scope=source")
+
+    assert opened.status_code == 200
+    assert opened.json() == {"opened": True}
+    assert forbidden.status_code == 403
+    assert calls == [("record-1", "source")]
+
+
 def test_duplicate_moved_file_only_restores_through_one_record(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     db = Database(paths.database)

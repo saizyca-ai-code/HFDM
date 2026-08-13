@@ -158,6 +158,8 @@ export const api = {
     }),
   tasks: () => request<DownloadTask[]>("/api/tasks"),
   library: () => request<LibraryItem[]>("/api/library"),
+  openLibraryFolder: (recordId: string, scope: "source" | "version") =>
+    request<{ opened: boolean }>(`/api/library/${encodeURIComponent(recordId)}/open-folder?scope=${scope}`, { method: "POST" }),
   inspectTask: (taskId: string, provider: string, token = "", versionId?: number) =>
     request<TaskInspection>(`/api/tasks/${encodeURIComponent(taskId)}/inspect`, {
       method: "POST",

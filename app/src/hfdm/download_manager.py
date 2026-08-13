@@ -650,6 +650,27 @@ class DownloadManager:
     def task_destination(self, task: dict[str, Any]) -> Path:
         return self._resolve_destination_key(task["destination"])
 
+    def open_task_folder(self, task_id: str, scope: str = "version") -> None:
+        task = self.db.get_task(task_id)
+        if not task:
+            raise DownloadManagerError("找不到下載紀錄")
+        destination = self.task_destination(task)
+        if scope == "version":
+            target = destination
+        elif scope == "source":
+            target = destination.parent
+        else:
+            raise DownloadManagerError("不支援的資料夾範圍")
+        self._assert_inside_download_root(target)
+        if not target.is_dir():
+            raise DownloadManagerError("本機資料夾不存在，請先重新掃描內容庫")
+        if sys.platform != "win32":
+            raise DownloadManagerError("開啟本機資料夾目前只支援 Windows")
+        try:
+            subprocess.Popen(["explorer.exe", str(target)], shell=False)
+        except OSError as exc:
+            raise DownloadManagerError("無法開啟 Windows Explorer") from exc
+
     def _normalize_task_destinations(self) -> None:
         for task in self.db.list_task_locations():
             destination = self._destination_key(

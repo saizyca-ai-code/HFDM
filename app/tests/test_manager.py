@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import hfdm.download_manager as download_manager_module
 from hfdm.config import AppPaths
 from hfdm.database import Database
 from hfdm.download_manager import ActiveWorker, DownloadManager, DownloadManagerError
@@ -40,6 +41,56 @@ def test_task_can_pause_and_resume_without_starting_worker(tmp_path: Path) -> No
     ).resolve()
     assert manager.pause(task["id"])["status"] == "paused"
     assert manager.resume(task["id"])["status"] == "queued"
+
+
+def test_open_task_folder_uses_validated_windows_explorer_target(tmp_path: Path, monkeypatch) -> None:
+    manager = make_manager(tmp_path)
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        requested_revision="latest",
+        commit_hash="456",
+        files=[RepoFileInfo(path="model.safetensors", size=10)],
+        total_bytes=10,
+    )
+    task = manager.create_task(resolution, ["model.safetensors"], None)
+    destination = manager.task_destination(task)
+    destination.mkdir(parents=True)
+    launched: list[tuple[list[str], bool]] = []
+    monkeypatch.setattr(download_manager_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        download_manager_module.subprocess,
+        "Popen",
+        lambda command, shell: launched.append((command, shell)),
+    )
+
+    manager.open_task_folder(task["id"], "version")
+    manager.open_task_folder(task["id"], "source")
+
+    assert launched == [
+        (["explorer.exe", str(destination)], False),
+        (["explorer.exe", str(destination.parent)], False),
+    ]
+
+
+def test_open_task_folder_rejects_missing_or_unsafe_destination(tmp_path: Path, monkeypatch) -> None:
+    manager = make_manager(tmp_path)
+    resolution = RepoResolution(
+        repo_id="owner/repo",
+        requested_revision="main",
+        commit_hash="a" * 40,
+        files=[RepoFileInfo(path="model.bin", size=10)],
+        total_bytes=10,
+    )
+    task = manager.create_task(resolution, ["model.bin"], None)
+    monkeypatch.setattr(download_manager_module.sys, "platform", "win32")
+
+    with pytest.raises(DownloadManagerError, match="資料夾不存在"):
+        manager.open_task_folder(task["id"])
+
+    manager.db.set_task_destination(task["id"], "../outside")
+    with pytest.raises(DownloadManagerError, match="路徑不安全"):
+        manager.open_task_folder(task["id"])
 
 
 def test_same_source_version_is_reused_or_merged_without_duplicate_tasks(tmp_path: Path) -> None:
