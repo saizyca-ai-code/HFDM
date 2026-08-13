@@ -44,10 +44,20 @@
 - Use body wikilinks in the `關聯` callout to connect tasks and documents. Prefer links such as `[[T001 - Title]]` and `[[D001 - Title]]`.
 - Keep records concise and decision-oriented. Never store credentials, tokens, secrets, private keys, or unnecessary raw command output in Obsidian.
 
+## Plan workflow and acceptance
+
+- Treat each Plan as the central cross-task roadmap. Give it a `plan status` of `Pending`, `In progress`, `Done`, `Deferred`, or `Aborted`; `doc published` is publication metadata and must not be used as execution status.
+- When creating a Plan, add a current-position callout and a Phase checklist. Link each Phase to its implementation Tasks instead of duplicating detailed execution logs in the Plan.
+- Update the Plan when it is created, a Phase starts or completes, scope changes, work is deferred or aborted, and the whole Plan completes. Do not use a subjective percentage for Plan progress.
+- Use `Deferred` for work that may resume. Use `Aborted` only for an explicit termination, record the reason and recovery conditions, and leave the affected Phase unchecked.
+- Separate `開發端驗證` from `使用者驗收` in Task notes. Developer verification contains automated tests, builds, migrations, portable checks, and rollback evidence. User acceptance contains only reproducible actions that require the user, with prerequisites and expected results.
+- Keep detailed user acceptance steps in the Task and only a summary plus Task link in the Plan. An implementation Task may close after its required developer verification succeeds, but a Phase must remain incomplete until required user acceptance is checked. Mark optional acceptance explicitly so it does not block the Phase.
+- If user acceptance fails, reopen the original Task or create and link a bug Task. Never record tokens, credentials, or other secrets in an acceptance checklist.
+
 ## Controlled vocabulary
 
 - Treat `_Habits/Attribute Items.md` as the authoritative list of allowed property values and naming rules.
-- Actual task and document properties such as `task status`, `task type`, `component`, `owner`, `doc type`, and `複雜度` should normally be scalar text values; lists in `Attribute Items.md` describe allowed values rather than required YAML list types.
+- Actual task and document properties such as `task status`, `task type`, `component`, `owner`, `doc type`, `plan status`, and `複雜度` should normally be scalar text values; lists in `Attribute Items.md` describe allowed values rather than required YAML list types.
 - Use optional native `tags` only for secondary cross-cutting concerns that do not fit the controlled primary classification. Do not duplicate `task type` or `component` in tags.
 - If a new status, task type, component, owner, document type, complexity value, or naming convention is necessary, update `Attribute Items.md` in the same task and explain the addition in the task record.
 - Explicit user instructions override this workflow. If Obsidian or its CLI is unavailable, report it instead of silently omitting the durable record.
