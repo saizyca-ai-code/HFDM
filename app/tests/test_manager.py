@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import pytest
@@ -327,3 +328,86 @@ def test_coordinator_dispatches_dataset_worker(tmp_path: Path, monkeypatch) -> N
 
     assert dispatched[0]["repo_type"] == "dataset"
     assert manager.db.get_task(created["id"])["status"] == "downloading"  # type: ignore[index]
+
+
+def test_civitai_identity_metadata_hash_and_destination_are_persisted(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    token = "civitai_memory_only"
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        repo_type="model",
+        requested_revision="latest",
+        commit_hash="456",
+        display_name="Example LoRA",
+        provider_metadata={"model_id": 123, "version_id": 456},
+        files=[
+            RepoFileInfo(
+                path="example.safetensors",
+                size=10,
+                remote_id="789",
+                sha256="a" * 64,
+                provider_metadata={
+                    "download_url": "https://civitai.com/api/download/models/456"
+                },
+            )
+        ],
+        total_bytes=10,
+    )
+
+    task = manager.create_task(resolution, ["example.safetensors"], token)
+
+    assert task["provider"] == "civitai"
+    assert task["display_name"] == "Example LoRA"
+    assert task["destination"] == "civitai/models/123/456"
+    assert manager.task_destination(task) == (tmp_path / "download/civitai/models/123/456").resolve()
+    assert task["files"][0]["remote_id"] == "789"
+    assert task["files"][0]["expected_sha256"] == "a" * 64
+    assert task["files"][0]["provider_metadata"]["download_url"].startswith(
+        "https://civitai.com/api/download/models/"
+    )
+    assert token.encode() not in manager.paths.database.read_bytes()
+
+
+def test_civitai_worker_auth_error_changes_task_to_auth_required(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        repo_type="model",
+        requested_revision="latest",
+        commit_hash="456",
+        files=[
+            RepoFileInfo(
+                path="private.bin",
+                size=3,
+                remote_id="789",
+                provider_metadata={
+                    "download_url": "https://civitai.com/api/download/models/456"
+                },
+            )
+        ],
+        total_bytes=3,
+    )
+    task = manager.create_task(resolution, ["private.bin"], None)
+    file = task["files"][0]
+
+    class FailedProcess:
+        stdout = io.StringIO(
+            '{"type":"error","error":"token required","kind":"CivitaiAuthRequired"}\n'
+        )
+        stderr = io.StringIO("")
+
+        @staticmethod
+        def wait():
+            return 1
+
+    worker = ActiveWorker(task["id"], file["id"], "civitai:key", FailedProcess())  # type: ignore[arg-type]
+    manager._active[worker.key] = worker
+    manager._monitor(worker, 3)
+
+    failed = manager.db.get_task(task["id"])
+    assert failed is not None
+    assert failed["status"] == "auth_required"
+    assert failed["requires_token"] is True
+    assert failed["files"][0]["status"] == "paused"

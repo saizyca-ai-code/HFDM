@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hfdm.config import AppPaths
+from hfdm.civitai_service import CivitaiService
 from hfdm.database import utc_now
 from hfdm.hf_service import HuggingFaceService
 from hfdm.main import create_app
@@ -213,3 +214,73 @@ def test_dataset_resolve_and_create_api_preserve_repo_type_and_globs(
     created_record = app.state.db.get_task(created.json()["id"])
     assert created_record is not None
     assert created_record["destination"] == f"datasets/owner/data/{'d' * 40}"
+
+
+def test_civitai_resolve_create_and_inspect_keep_token_out_of_storage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = AppPaths(
+        root=tmp_path,
+        data=tmp_path / "data",
+        downloads=tmp_path / "download",
+        database=tmp_path / "data" / "hfdm.sqlite3",
+        frontend_dist=tmp_path / "dist",
+    )
+    app = create_app(paths)
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        repo_type="model",
+        requested_revision="456",
+        commit_hash="456",
+        display_name="Example LoRA",
+        files=[
+            RepoFileInfo(
+                path="example.safetensors",
+                size=10,
+                remote_id="789",
+                sha256="a" * 64,
+                provider_metadata={
+                    "download_url": "https://civitai.com/api/download/models/456"
+                },
+            )
+        ],
+        total_bytes=10,
+        suggested_files=["example.safetensors"],
+    )
+    monkeypatch.setattr(CivitaiService, "resolve", lambda self, source, token=None, version_id=None: resolution)
+    monkeypatch.setattr(
+        CivitaiService,
+        "resolve_existing",
+        lambda self, repo_id, requested_revision, token=None, version_id=None: resolution,
+    )
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resolved = client.post(
+        "/api/repos/resolve",
+        json={"source": "model:123", "civitai_token": "civitai_secret", "civitai_version_id": 456},
+    )
+    created = client.post(
+        "/api/tasks",
+        json={
+            "source": "model:123",
+            "selected_files": ["example.safetensors"],
+            "civitai_token": "civitai_secret",
+            "civitai_version_id": 456,
+        },
+    )
+    inspected = client.post(
+        f"/api/tasks/{created.json()['id']}/inspect",
+        json={"civitai_token": "civitai_secret", "civitai_version_id": 456},
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["provider"] == "civitai"
+    assert created.status_code == 201
+    stored = app.state.db.get_task(created.json()["id"])
+    assert stored is not None
+    assert stored["destination"] == "civitai/models/123/456"
+    assert inspected.status_code == 200
+    assert inspected.json()["resolution"]["provider"] == "civitai"
+    assert "civitai_secret" not in resolved.text + created.text + inspected.text
+    assert b"civitai_secret" not in paths.database.read_bytes()

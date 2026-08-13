@@ -72,4 +72,5 @@ DEFAULT_SETTINGS: dict[str, int] = {
     "min_free_bytes": 10 * 1024**3,
     "retention_days": 0,
     "allow_delete_files": 1,
+    "civitai_segments": 4,
 }

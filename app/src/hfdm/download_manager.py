@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -95,9 +96,11 @@ class DownloadManager:
         if not selected:
             raise DownloadManagerError("至少選擇一個檔案")
 
-        owner, repo = resolution.repo_id.split("/", 1)
         destination_key = self._destination_key(
-            resolution.repo_type, owner, repo, resolution.commit_hash
+            resolution.provider,
+            resolution.repo_type,
+            resolution.repo_id,
+            resolution.commit_hash,
         )
         destination = self._resolve_destination_key(destination_key)
         missing_bytes = sum(
@@ -109,6 +112,7 @@ class DownloadManager:
         task_id = str(uuid.uuid4())
         task = {
             "id": task_id,
+            "provider": resolution.provider,
             "repo_id": resolution.repo_id,
             "repo_type": resolution.repo_type,
             "requested_revision": resolution.requested_revision,
@@ -116,7 +120,11 @@ class DownloadManager:
             "destination": destination_key,
             "status": "queued",
             "total_bytes": sum(item.size for item in selected),
-            "requires_token": int(bool(token)),
+            "requires_token": int(
+                bool(token) or bool(resolution.provider_metadata.get("requires_token"))
+            ),
+            "display_name": resolution.display_name,
+            "provider_metadata": resolution.provider_metadata,
             "created_at": now,
             "updated_at": now,
         }
@@ -127,6 +135,10 @@ class DownloadManager:
                 "path": item.path,
                 "size": item.size,
                 "status": "queued",
+                "remote_id": item.remote_id,
+                "expected_sha256": item.sha256,
+                "download_url": item.provider_metadata.get("download_url"),
+                "provider_metadata": item.provider_metadata,
             }
             for item in selected
         ]
@@ -169,7 +181,12 @@ class DownloadManager:
         file_rows: list[dict[str, Any]] = []
         for item in selected:
             existing = current.get(item.path)
-            unchanged = existing is not None and int(existing["size"]) == item.size
+            unchanged = (
+                existing is not None
+                and int(existing["size"]) == item.size
+                and existing.get("remote_id") == item.remote_id
+                and existing.get("expected_sha256") == item.sha256
+            )
             file_rows.append(
                 {
                     "id": existing["id"] if unchanged else str(uuid.uuid4()),
@@ -184,6 +201,10 @@ class DownloadManager:
                     "observed_mtime_ns": existing.get("observed_mtime_ns") if unchanged else None,
                     "observed_sha256": existing.get("observed_sha256") if unchanged else None,
                     "last_reconciled_at": existing.get("last_reconciled_at") if unchanged else None,
+                    "remote_id": item.remote_id,
+                    "expected_sha256": item.sha256,
+                    "download_url": item.provider_metadata.get("download_url"),
+                    "provider_metadata": item.provider_metadata,
                 }
             )
         try:
@@ -226,7 +247,8 @@ class DownloadManager:
             self._tokens[task_id] = token
         if task["requires_token"] and task_id not in self._tokens:
             self.db.update_task(task_id, status="auth_required")
-            raise DownloadManagerError("請重新提供 Hugging Face token")
+            provider = "Civitai" if task.get("provider") == "civitai" else "Hugging Face"
+            raise DownloadManagerError(f"請重新提供 {provider} token")
         self.db.bulk_file_status(task_id, ["paused", "failed"], "queued")
         self.db.update_task(task_id, status="queued", error=None)
         self._publish(task_id, "resumed")
@@ -242,7 +264,8 @@ class DownloadManager:
     def redownload_missing(self, task_id: str, token: str | None = None) -> dict[str, Any]:
         task = self._require_task(task_id)
         if task["requires_token"] and not token:
-            raise DownloadManagerError("A Hugging Face token is required to restore these files")
+            provider = "Civitai" if task.get("provider") == "civitai" else "Hugging Face"
+            raise DownloadManagerError(f"A {provider} token is required to restore these files")
         if token:
             self._tokens[task_id] = token
         try:
@@ -372,7 +395,7 @@ class DownloadManager:
             destination = self.task_destination(task)
             target = (destination / Path(file["path"])).resolve()
             self._assert_inside(destination, target)
-            if target.is_file() and target.stat().st_size == file["size"]:
+            if self._can_reuse_file(target, file):
                 self.db.update_file(
                     file["id"], status="completed", downloaded_bytes=file["size"], error=None
                 )
@@ -381,7 +404,10 @@ class DownloadManager:
                 self._wake.set()
                 continue
 
-            key = f"{task['repo_type']}:{task['repo_id']}:{task['commit_hash']}:{file['path']}"
+            key = (
+                f"{task['provider']}:{task['repo_type']}:{task['repo_id']}:"
+                f"{task['commit_hash']}:{file['path']}"
+            )
             with self._lock:
                 if key in self._active:
                     continue
@@ -410,6 +436,7 @@ class DownloadManager:
             creationflags=creation_flags,
         )
         payload = {
+            "provider": task["provider"],
             "repo_id": task["repo_id"],
             "repo_type": task["repo_type"],
             "commit_hash": task["commit_hash"],
@@ -417,6 +444,15 @@ class DownloadManager:
             "destination": str(self.task_destination(task)),
             "token": self._tokens.get(task["id"]),
         }
+        if task["provider"] == "civitai":
+            payload.update(
+                {
+                    "expected_size": file["size"],
+                    "expected_sha256": file.get("expected_sha256"),
+                    "download_url": file.get("download_url"),
+                    "segments": self.db.get_settings()["civitai_segments"],
+                }
+            )
         assert process.stdin is not None
         process.stdin.write(json.dumps(payload))
         process.stdin.close()
@@ -424,6 +460,7 @@ class DownloadManager:
 
     def _monitor(self, worker: ActiveWorker, expected_size: int) -> None:
         last_error: str | None = None
+        auth_required = False
         assert worker.process.stdout is not None
         for line in worker.process.stdout:
             try:
@@ -452,6 +489,7 @@ class DownloadManager:
                 self._publish(worker.task_id, "progress", worker.file_id)
             elif event.get("type") == "error":
                 last_error = str(event.get("error") or "下載失敗")[:2000]
+                auth_required = event.get("kind") == "CivitaiAuthRequired"
 
         return_code = worker.process.wait()
         if last_error is None and return_code != 0 and worker.process.stderr:
@@ -470,6 +508,14 @@ class DownloadManager:
                 downloaded_bytes=expected_size,
                 error=None,
             )
+        elif auth_required:
+            self.db.update_file(worker.file_id, status="paused", error=last_error)
+            self.db.update_task(
+                worker.task_id,
+                status="auth_required",
+                requires_token=1,
+                error="請提供 Civitai API Token 後繼續",
+            )
         elif task["status"] == "pausing":
             self.db.update_file(worker.file_id, status="paused", error=None)
         elif task["status"] == "cancelled":
@@ -479,7 +525,10 @@ class DownloadManager:
             self.db.update_task(worker.task_id, error=last_error)
         self.db.recompute_progress(worker.task_id)
         self.db.update_task(worker.task_id, speed_bps=0, eta_seconds=None)
-        self._finalize_task(worker.task_id)
+        if not auth_required:
+            self._finalize_task(worker.task_id)
+        else:
+            self._publish(worker.task_id, "auth_required", worker.file_id)
         self._wake.set()
 
     def _finalize_task(self, task_id: str) -> None:
@@ -550,22 +599,38 @@ class DownloadManager:
         return selected
 
     def task_destination(self, task: dict[str, Any]) -> Path:
-        owner, repo = task["repo_id"].split("/", 1)
-        key = self._destination_key(task["repo_type"], owner, repo, task["commit_hash"])
-        return self._resolve_destination_key(key)
+        return self._resolve_destination_key(task["destination"])
 
     def _normalize_task_destinations(self) -> None:
         for task in self.db.list_task_locations():
-            owner, repo = task["repo_id"].split("/", 1)
             destination = self._destination_key(
-                task["repo_type"], owner, repo, task["commit_hash"]
+                task["provider"],
+                task["repo_type"],
+                task["repo_id"],
+                task["commit_hash"],
             )
             if task["destination"] != destination:
                 self.db.set_task_destination(task["id"], destination)
 
     def _destination_key(
-        self, repo_type: str, owner: str, repo: str, commit_hash: str
+        self,
+        provider: str,
+        repo_type: str,
+        repo_id: str,
+        commit_hash: str,
     ) -> str:
+        owner, repo = repo_id.split("/", 1)
+        if provider == "civitai":
+            if repo_type != "model" or owner != "models":
+                raise DownloadManagerError("不支援的 Civitai identity")
+            return PurePosixPath(
+                "civitai",
+                "models",
+                self._safe_segment(repo),
+                self._safe_segment(commit_hash),
+            ).as_posix()
+        if provider != "huggingface":
+            raise DownloadManagerError(f"不支援的下載來源：{provider}")
         if repo_type not in {"model", "dataset"}:
             raise DownloadManagerError(f"不支援的 Hugging Face repo type：{repo_type}")
         return PurePosixPath(
@@ -574,6 +639,19 @@ class DownloadManager:
             self._safe_segment(repo),
             self._safe_segment(commit_hash),
         ).as_posix()
+
+    @staticmethod
+    def _can_reuse_file(target: Path, file: dict[str, Any]) -> bool:
+        if not target.is_file() or target.stat().st_size != int(file["size"]):
+            return False
+        expected = file.get("expected_sha256")
+        if not expected:
+            return True
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest().casefold() == str(expected).casefold()
 
     def _resolve_destination_key(self, key: str) -> Path:
         relative = self._safe_relative(key)

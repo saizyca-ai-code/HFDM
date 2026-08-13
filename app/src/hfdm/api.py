@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from huggingface_hub.errors import HfHubHTTPError
 
+from .civitai_ref import InvalidCivitaiReference, is_civitai_reference
+from .civitai_service import CivitaiService, CivitaiServiceError
 from .database import Database
 from .download_manager import DownloadManager, DownloadManagerError
 from .events import EventBroker
@@ -16,6 +18,8 @@ from .hf_service import HuggingFaceService
 from .repo_ref import InvalidRepoReference
 from .schemas import (
     AppSettingsView,
+    CivitaiSearchRequest,
+    CivitaiSearchResult,
     CreateTaskRequest,
     IdentityView,
     InspectTaskRequest,
@@ -36,7 +40,7 @@ def token_value(secret: object | None) -> str | None:
         return None
     value = secret.get_secret_value()  # type: ignore[attr-defined]
     if len(value) > 512:
-        raise HTTPException(status_code=422, detail="HF token 長度不正確")
+        raise HTTPException(status_code=422, detail="Token 長度不正確")
     return value or None
 
 
@@ -53,10 +57,26 @@ def require_admin(request: Request) -> None:
 def create_router(
     db: Database,
     hf: HuggingFaceService,
+    civitai: CivitaiService,
     manager: DownloadManager,
     broker: EventBroker,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    def resolve_source(
+        payload: RepoResolveRequest | CreateTaskRequest,
+    ) -> tuple[RepoResolution, str | None]:
+        if is_civitai_reference(payload.source):
+            token = token_value(payload.civitai_token)
+            return civitai.resolve(payload.source, token, payload.civitai_version_id), token
+        token = token_value(payload.hf_token)
+        include_globs = payload.include_globs if isinstance(payload, RepoResolveRequest) else None
+        exclude_globs = payload.exclude_globs if isinstance(payload, RepoResolveRequest) else None
+        return hf.resolve(payload.source, token, include_globs, exclude_globs), token
+
+    def task_token(task: dict, payload: object) -> str | None:
+        field = "civitai_token" if task["provider"] == "civitai" else "hf_token"
+        return token_value(getattr(payload, field, None))
 
     @router.get("/health")
     def health() -> dict[str, str]:
@@ -70,14 +90,11 @@ def create_router(
     @router.post("/repos/resolve", response_model=RepoResolution)
     def resolve_repo(payload: RepoResolveRequest) -> RepoResolution:
         try:
-            return hf.resolve(
-                payload.source,
-                token_value(payload.hf_token),
-                payload.include_globs,
-                payload.exclude_globs,
-            )
-        except (InvalidRepoReference, InvalidGlobPattern) as exc:
+            return resolve_source(payload)[0]
+        except (InvalidRepoReference, InvalidCivitaiReference, InvalidGlobPattern) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except HfHubHTTPError as exc:
             code = exc.response.status_code if exc.response else 502
             detail = "無法存取 Hugging Face repo，請確認網址、權限或 token"
@@ -85,14 +102,22 @@ def create_router(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"讀取 Hugging Face repo 失敗：{exc}") from exc
 
+    @router.post("/civitai/models/search", response_model=CivitaiSearchResult)
+    def search_civitai(payload: CivitaiSearchRequest) -> CivitaiSearchResult:
+        try:
+            return civitai.search(payload, token_value(payload.civitai_token))
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     @router.post("/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: CreateTaskRequest) -> dict:
         try:
-            token = token_value(payload.hf_token)
-            resolution = hf.resolve(payload.source, token)
+            resolution, token = resolve_source(payload)
             return manager.create_task(resolution, payload.selected_files, token)
-        except (InvalidRepoReference, DownloadManagerError) as exc:
+        except (InvalidRepoReference, InvalidCivitaiReference, DownloadManagerError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except HfHubHTTPError as exc:
             raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
 
@@ -121,12 +146,23 @@ def create_router(
         if not task:
             raise HTTPException(status_code=404, detail="找不到下載任務")
         try:
-            resolution = hf.resolve_existing(
-                task["repo_id"],
-                task["requested_revision"],
-                token_value(payload.hf_token),
-                repo_type=task["repo_type"],
-            )
+            token = task_token(task, payload)
+            if task["provider"] == "civitai":
+                resolution = civitai.resolve_existing(
+                    task["repo_id"],
+                    task["requested_revision"],
+                    token,
+                    payload.civitai_version_id,
+                )
+            else:
+                resolution = hf.resolve_existing(
+                    task["repo_id"],
+                    task["requested_revision"],
+                    token,
+                    repo_type=task["repo_type"],
+                )
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except HfHubHTTPError as exc:
             raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
         except HTTPException:
@@ -162,13 +198,21 @@ def create_router(
         if not task:
             raise HTTPException(status_code=404, detail="找不到下載任務")
         try:
-            token = token_value(payload.hf_token)
-            resolution = hf.resolve_existing(
-                task["repo_id"],
-                task["requested_revision"],
-                token,
-                repo_type=task["repo_type"],
-            )
+            token = task_token(task, payload)
+            if task["provider"] == "civitai":
+                resolution = civitai.resolve_existing(
+                    task["repo_id"],
+                    task["requested_revision"],
+                    token,
+                    payload.civitai_version_id,
+                )
+            else:
+                resolution = hf.resolve_existing(
+                    task["repo_id"],
+                    task["requested_revision"],
+                    token,
+                    repo_type=task["repo_type"],
+                )
             update_available = resolution.commit_hash != task["commit_hash"]
             configured, created_new = manager.reconfigure_task(
                 task_id,
@@ -183,6 +227,8 @@ def create_router(
             }
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except HfHubHTTPError as exc:
             raise HTTPException(status_code=403, detail="無法使用提供的 token 存取此 repo") from exc
         except HTTPException:
@@ -207,14 +253,20 @@ def create_router(
     @router.post("/tasks/{task_id}/resume", response_model=TaskView, dependencies=[Depends(require_admin)])
     def resume_task(task_id: str, payload: ResumeTaskRequest) -> dict:
         try:
-            return manager.resume(task_id, token_value(payload.hf_token))
+            task = db.get_task(task_id)
+            if not task:
+                raise DownloadManagerError("找不到下載任務")
+            return manager.resume(task_id, task_token(task, payload))
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
 
     @router.post("/tasks/{task_id}/retry", response_model=TaskView, dependencies=[Depends(require_admin)])
     def retry_task(task_id: str, payload: ResumeTaskRequest) -> dict:
         try:
-            return manager.retry(task_id, token_value(payload.hf_token))
+            task = db.get_task(task_id)
+            if not task:
+                raise DownloadManagerError("找不到下載任務")
+            return manager.retry(task_id, task_token(task, payload))
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
 
@@ -225,7 +277,10 @@ def create_router(
     )
     def redownload_missing(task_id: str, payload: RedownloadTaskRequest) -> dict:
         try:
-            return manager.redownload_missing(task_id, token_value(payload.hf_token))
+            task = db.get_task(task_id)
+            if not task:
+                raise DownloadManagerError("找不到下載任務")
+            return manager.redownload_missing(task_id, task_token(task, payload))
         except DownloadManagerError as exc:
             raise command_error(exc) from exc
 

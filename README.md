@@ -24,7 +24,10 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
 - Previews Dataset selections with comma- or newline-separated include/exclude glob patterns.
 - Separates immutable transfer history from reconciled local availability and supports restoring moved or missing files.
 - Includes an opt-in Model/Dataset benchmark harness under `app/tests/benchmarks/` for balanced, maximum, and HDD Xet profiles.
-- Civitai is intentionally deferred to D004 Phase 3.
+- Resolves Civitai model/version URLs and IDs, previews versions and file variants,
+  and stores downloads by stable model/version identity.
+- Supports resumable segmented Civitai transfers with redirect refresh and SHA256
+  verification; API tokens remain memory-only.
 
 ## Requirements
 
@@ -166,6 +169,7 @@ Run verification:
 data/hfdm.sqlite3
 download/models/<owner>/<repo>/<commit>/<repo files>
 download/datasets/<owner>/<repo>/<commit>/<repo files>
+download/civitai/models/<model-id>/<version-id>/<files>
 ```
 
 Both directories are runtime state and are ignored by Git. Task destinations are
@@ -188,6 +192,10 @@ backup is never overwritten by later V2 startups.
 
 ## Security boundary
 
-V1 is for a trusted LAN and does not provide login or HTTPS. A user-supplied HF token crosses the LAN over plain HTTP, is kept only in process memory, and is discarded after completion or cancellation. If the service restarts, authenticated unfinished tasks enter `auth_required` and need a token again.
+HFDM is for a trusted LAN and does not provide login or HTTPS. A user-supplied HF
+or Civitai token crosses the LAN over plain HTTP, is kept only in process memory,
+and is discarded after completion or cancellation. If the service restarts,
+authenticated unfinished tasks enter `auth_required` and need the matching
+provider token again.
 
 Do not expose this version directly to the public internet.

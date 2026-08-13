@@ -1,6 +1,43 @@
-export type RepoFile = { path: string; size: number; lfs: boolean }
+export type RepoFile = {
+  path: string
+  size: number
+  lfs: boolean
+  remote_id?: string | null
+  sha256?: string | null
+  primary: boolean
+  file_type?: string | null
+  format?: string | null
+  precision?: string | null
+  scan_status?: string | null
+  provider_metadata: Record<string, unknown>
+}
+
+export type SourceVersion = {
+  id: string
+  name: string
+  base_model?: string | null
+  created_at?: string | null
+}
+
+export type CivitaiSearchItem = {
+  id: number
+  name: string
+  model_type?: string | null
+  creator?: string | null
+  latest_version_id?: number | null
+  base_model?: string | null
+  preview_url?: string | null
+}
+
+export type CivitaiSearchResult = {
+  items: CivitaiSearchItem[]
+  current_page: number
+  total_pages: number
+  next_page?: number | null
+}
 
 export type RepoResolution = {
+  provider: "huggingface" | "civitai"
   repo_id: string
   repo_type: string
   requested_revision: string
@@ -8,6 +45,10 @@ export type RepoResolution = {
   files: RepoFile[]
   total_bytes: number
   suggested_files: string[]
+  display_name?: string | null
+  version_name?: string | null
+  versions: SourceVersion[]
+  provider_metadata: Record<string, unknown>
 }
 
 export type TaskFile = {
@@ -20,6 +61,9 @@ export type TaskFile = {
   local_status: "available" | "partial" | "moved" | "changed" | "unknown"
   observed_size?: number | null
   observed_mtime_ns?: number | null
+  remote_id?: string | null
+  expected_sha256?: string | null
+  provider_metadata: Record<string, unknown>
 }
 
 export type DownloadTask = {
@@ -42,6 +86,8 @@ export type DownloadTask = {
   completed_at?: string | null
   last_reconciled_at?: string | null
   error?: string | null
+  display_name?: string | null
+  provider_metadata: Record<string, unknown>
   files: TaskFile[]
 }
 
@@ -82,6 +128,7 @@ export type LibraryItem = {
   history_count: number
   total_bytes: number
   requires_token: boolean
+  display_name?: string | null
   restore_record_ids: string[]
   files: LibraryFile[]
 }
@@ -92,6 +139,12 @@ export type AppSettings = {
   min_free_bytes: number
   retention_days: number
   allow_delete_files: boolean
+  civitai_segments: number
+}
+
+function sourceToken(source: string, token: string): Record<string, string | null> {
+  const civitai = /(^\s*\d+\s*$)|(^\s*(model|version)s?[:/])|civitai\.com/i.test(source)
+  return civitai ? { civitai_token: token || null } : { hf_token: token || null }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -108,38 +161,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   identity: () => request<{ role: "admin" | "visitor"; is_admin: boolean }>("/api/identity"),
-  resolveRepo: (source: string, hfToken: string, includeGlobs: string[] = [], excludeGlobs: string[] = []) =>
+  resolveRepo: (source: string, token: string, includeGlobs: string[] = [], excludeGlobs: string[] = [], versionId?: number) =>
     request<RepoResolution>("/api/repos/resolve", {
       method: "POST",
-      body: JSON.stringify({ source, hf_token: hfToken || null, include_globs: includeGlobs, exclude_globs: excludeGlobs }),
+      body: JSON.stringify({ source, ...sourceToken(source, token), include_globs: includeGlobs, exclude_globs: excludeGlobs, civitai_version_id: versionId || null }),
     }),
-  createTask: (source: string, selectedFiles: string[], hfToken: string) =>
+  searchCivitai: (filters: { query?: string; tag?: string; username?: string; types?: string[]; base_models?: string[]; sort?: string; period?: string; page?: number }, token = "") =>
+    request<CivitaiSearchResult>("/api/civitai/models/search", {
+      method: "POST",
+      body: JSON.stringify({ ...filters, civitai_token: token || null }),
+    }),
+  createTask: (source: string, selectedFiles: string[], token: string, versionId?: number) =>
     request<DownloadTask>("/api/tasks", {
       method: "POST",
-      body: JSON.stringify({ source, selected_files: selectedFiles, hf_token: hfToken || null }),
+      body: JSON.stringify({ source, selected_files: selectedFiles, ...sourceToken(source, token), civitai_version_id: versionId || null }),
     }),
   tasks: () => request<DownloadTask[]>("/api/tasks"),
   library: () => request<LibraryItem[]>("/api/library"),
-  inspectTask: (taskId: string, hfToken = "") =>
+  inspectTask: (taskId: string, provider: string, token = "", versionId?: number) =>
     request<TaskInspection>(`/api/tasks/${encodeURIComponent(taskId)}/inspect`, {
       method: "POST",
-      body: JSON.stringify({ hf_token: hfToken || null }),
+      body: JSON.stringify({ [provider === "civitai" ? "civitai_token" : "hf_token"]: token || null, civitai_version_id: versionId || null }),
     }),
-  updateTaskConfiguration: (taskId: string, selectedFiles: string[], hfToken = "") =>
+  updateTaskConfiguration: (taskId: string, selectedFiles: string[], provider: string, token = "", versionId?: number) =>
     request<TaskConfigurationResult>(`/api/tasks/${encodeURIComponent(taskId)}/configuration`, {
       method: "PUT",
-      body: JSON.stringify({ selected_files: selectedFiles, hf_token: hfToken || null }),
+      body: JSON.stringify({ selected_files: selectedFiles, [provider === "civitai" ? "civitai_token" : "hf_token"]: token || null, civitai_version_id: versionId || null }),
     }),
   reconcileHistory: () => request<{ updated: number }>("/api/history/reconcile", { method: "POST" }),
-  redownloadMissing: (taskId: string, hfToken = "") =>
+  redownloadMissing: (taskId: string, provider: string, token = "") =>
     request<DownloadTask>(`/api/tasks/${encodeURIComponent(taskId)}/redownload-missing`, {
       method: "POST",
-      body: JSON.stringify({ hf_token: hfToken || null }),
+      body: JSON.stringify({ [provider === "civitai" ? "civitai_token" : "hf_token"]: token || null }),
     }),
-  command: (taskId: string, command: "pause" | "resume" | "retry" | "cancel", hfToken = "") =>
+  command: (taskId: string, command: "pause" | "resume" | "retry" | "cancel", provider: string, token = "") =>
     request<DownloadTask>(`/api/tasks/${taskId}/${command}`, {
       method: "POST",
-      body: JSON.stringify({ hf_token: hfToken || null }),
+      body: JSON.stringify({ [provider === "civitai" ? "civitai_token" : "hf_token"]: token || null }),
     }),
   settings: () => request<AppSettings>("/api/settings"),
   updateSettings: (settings: AppSettings) =>

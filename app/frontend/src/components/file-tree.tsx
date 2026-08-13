@@ -77,6 +77,8 @@ function NodeRow({
         <Checkbox checked={checked} onCheckedChange={(value) => togglePaths(paths, value)} />
         {isFolder ? <Folder className="size-4 text-cyan-400/70" /> : <File className="size-4 text-slate-500" />}
         <span className={cn("min-w-0 flex-1 truncate", isFolder ? "font-medium text-slate-300" : "text-slate-400")}>{node.name}</span>
+        {node.file?.primary && <span className="rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-cyan-300">Primary</span>}
+        {node.file?.format && <span className="hidden text-[10px] text-slate-600 sm:inline">{node.file.format}{node.file.precision ? ` · ${node.file.precision}` : ""}</span>}
         {node.file ? <span className="font-mono text-[11px] text-slate-600">{formatBytes(node.file.size)}</span> : <span className="text-[11px] text-slate-600">{paths.length} files</span>}
       </div>
       {isFolder && isOpen && node.children.map((child) => (
@@ -119,6 +121,8 @@ export function FileTree({ files, selected, onChange }: { files: RepoFile[]; sel
             <Checkbox checked={selected.has(file.path)} onCheckedChange={(checked) => togglePaths([file.path], checked)} />
             <File className="size-4 text-slate-500" />
             <span className="min-w-0 flex-1 truncate text-slate-400">{file.path}</span>
+            {file.primary && <span className="rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-cyan-300">Primary</span>}
+            {file.format && <span className="hidden text-[10px] text-slate-600 sm:inline">{file.format}{file.precision ? ` · ${file.precision}` : ""}</span>}
             <span className="font-mono text-[11px] text-slate-600">{formatBytes(file.size)}</span>
           </div>
         )) : tree.map((node) => (

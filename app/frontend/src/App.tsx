@@ -16,6 +16,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Server,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -32,7 +33,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
+import { api, fileDownloadUrl, type AppSettings, type CivitaiSearchItem, type DownloadTask, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
 import { cn, formatBytes, formatEta, percent } from "@/lib/utils"
 
 type Page = "new" | "transfers" | "library" | "settings"
@@ -42,6 +43,7 @@ type NewDownloadDraft = {
   token: string
   includeGlobs: string
   excludeGlobs: string
+  versionId: string
   repo: RepoResolution | null
   selected: Set<string>
 }
@@ -52,6 +54,7 @@ function emptyDownloadDraft(): NewDownloadDraft {
     token: "",
     includeGlobs: "",
     excludeGlobs: "",
+    versionId: "",
     repo: null,
     selected: new Set(),
   }
@@ -194,7 +197,17 @@ function PageHeading({ eyebrow, title, description, action }: { eyebrow: string;
 function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; setDraft: React.Dispatch<React.SetStateAction<NewDownloadDraft>>; onCreated: () => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
-  const { source, token, includeGlobs, excludeGlobs, repo, selected } = draft
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchType, setSearchType] = useState("")
+  const [searchBaseModel, setSearchBaseModel] = useState("")
+  const [searchCreator, setSearchCreator] = useState("")
+  const [searchTag, setSearchTag] = useState("")
+  const [searchSort, setSearchSort] = useState("Most Downloaded")
+  const [searchPeriod, setSearchPeriod] = useState("AllTime")
+  const [searchResults, setSearchResults] = useState<CivitaiSearchItem[]>([])
+  const { source, token, includeGlobs, excludeGlobs, versionId, repo, selected } = draft
+  const isCivitai = repo?.provider === "civitai" || /civitai\.com|^\s*(?:\d+|models?[:/]|versions?[:/])/i.test(source)
   const selectedBytes = useMemo(() => repo?.files.filter((file) => selected.has(file.path)).reduce((sum, file) => sum + file.size, 0) ?? 0, [repo, selected])
 
   const updateDraft = (values: Partial<NewDownloadDraft>) => {
@@ -205,45 +218,65 @@ function NewDownload({ draft, setDraft, onCreated }: { draft: NewDownloadDraft; 
     setError("")
   }
 
-  const resolve = async () => {
+  const resolve = async (nextVersionId?: number, sourceOverride?: string) => {
     setBusy(true); setError("")
     try {
+      const nextSource = sourceOverride || source
       const result = await api.resolveRepo(
-        source,
+        nextSource,
         token,
         splitGlobInput(includeGlobs),
         splitGlobInput(excludeGlobs),
+        nextVersionId,
       )
-      updateDraft({ repo: result, selected: new Set(result.suggested_files) })
+      updateDraft({ source: nextSource, repo: result, versionId: result.provider === "civitai" ? result.commit_hash : "", selected: new Set(result.suggested_files) })
     } catch (reason) { setError(reason instanceof Error ? reason.message : "讀取 repo 失敗") }
+    finally { setBusy(false) }
+  }
+  const searchCivitai = async () => {
+    setBusy(true); setError("")
+    try {
+      const result = await api.searchCivitai({
+        query: searchQuery || undefined,
+        tag: searchTag || undefined,
+        username: searchCreator || undefined,
+        types: searchType ? [searchType] : [],
+        base_models: searchBaseModel ? [searchBaseModel] : [],
+        sort: searchSort,
+        period: searchPeriod,
+      }, token)
+      setSearchResults(result.items)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "搜尋 Civitai 失敗") }
     finally { setBusy(false) }
   }
   const create = async () => {
     if (!repo || !selected.size) return
     setBusy(true); setError("")
     try {
-      await api.createTask(source, [...selected], token)
+      await api.createTask(source, [...selected], token, repo.provider === "civitai" ? Number(versionId) : undefined)
       onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : "建立任務失敗") }
     finally { setBusy(false) }
   }
 
   return <>
-    <PageHeading eyebrow="New transfer" title="從 Hugging Face 取得內容" description="解析草稿會在切換 HFDM 分頁時保留於記憶體；Token 不會寫入瀏覽器儲存或伺服器。" action={<Button variant="ghost" onClick={clearDraft} disabled={busy || (!source && !token && !includeGlobs && !excludeGlobs && !repo)}><Trash2 className="size-4" />清除草稿</Button>} />
+    <PageHeading eyebrow="New transfer" title="從 Hugging Face 或 Civitai 取得內容" description="解析草稿會在切換 HFDM 分頁時保留於記憶體；HF／Civitai Token 只用於當次操作，不會寫入瀏覽器儲存或伺服器。" action={<Button variant="ghost" onClick={clearDraft} disabled={busy || (!source && !token && !includeGlobs && !excludeGlobs && !repo)}><Trash2 className="size-4" />清除草稿</Button>} />
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
       <Card>
-        <CardHeader><h2 className="font-semibold text-white">Repo 來源</h2><p className="text-xs text-slate-500">支援 owner/repo、datasets/owner/repo、Model／Dataset 網址與 /tree/&lt;revision&gt;</p></CardHeader>
+        <CardHeader><h2 className="font-semibold text-white">下載來源</h2><p className="text-xs text-slate-500">支援 Hugging Face Model／Dataset，以及 Civitai model／version URL 或 ID</p></CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => updateDraft({ source: event.target.value })} placeholder="Comfy-Org/z_image_turbo" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button></div>
-          <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => updateDraft({ token: event.target.value })} placeholder="HF Token（選填；只暫存於此頁面記憶體）" /></div>
-          <div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => updateDraft({ includeGlobs: event.target.value })} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => updateDraft({ excludeGlobs: event.target.value })} placeholder="Exclude glob，例如 data/test/**" /></div>
-          <div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div>
+          <div className="flex flex-col gap-2 sm:flex-row"><Input value={source} onChange={(event) => updateDraft({ source: event.target.value, repo: null, versionId: "" })} placeholder="HF owner/repo 或 Civitai model URL" onKeyDown={(event) => event.key === "Enter" && void resolve()} /><Button className="sm:w-28" onClick={() => void resolve()} disabled={busy || !source.trim()}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}解析</Button><Button variant="secondary" onClick={() => setSearchOpen(!searchOpen)}><Search className="size-4" />瀏覽 Civitai</Button></div>
+          <div className="relative"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={token} onChange={(event) => updateDraft({ token: event.target.value })} placeholder={`${isCivitai ? "Civitai API" : "HF"} Token（選填；只存於記憶體）`} /></div>
+          {searchOpen && <div className="space-y-3 rounded-xl border border-cyan-400/15 bg-cyan-400/[.025] p-4"><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><Input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="模型名稱" /><Input value={searchCreator} onChange={(event) => setSearchCreator(event.target.value)} placeholder="Creator" /><Input value={searchTag} onChange={(event) => setSearchTag(event.target.value)} placeholder="Tag" /><Input value={searchBaseModel} onChange={(event) => setSearchBaseModel(event.target.value)} placeholder="Base model，例如 SDXL 1.0" /><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-300" value={searchType} onChange={(event) => setSearchType(event.target.value)}><option value="">全部類型</option>{["Checkpoint", "LORA", "TextualInversion", "Controlnet", "VAE", "Upscaler"].map((value) => <option key={value}>{value}</option>)}</select><div className="grid grid-cols-2 gap-2"><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-2 text-xs text-slate-300" value={searchSort} onChange={(event) => setSearchSort(event.target.value)}>{["Most Downloaded", "Highest Rated", "Newest"].map((value) => <option key={value}>{value}</option>)}</select><select className="h-10 rounded-lg border border-white/10 bg-[#0a1016] px-2 text-xs text-slate-300" value={searchPeriod} onChange={(event) => setSearchPeriod(event.target.value)}>{["AllTime", "Year", "Month", "Week", "Day"].map((value) => <option key={value}>{value}</option>)}</select></div></div><div className="flex justify-end"><Button size="sm" onClick={() => void searchCivitai()} disabled={busy}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}搜尋</Button></div>{searchResults.length > 0 && <div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2">{searchResults.map((item) => <button key={item.id} onClick={() => void resolve(item.latest_version_id || undefined, `model:${item.id}`)} className="flex items-center gap-3 rounded-lg border border-white/[.06] bg-[#0a1016] p-3 text-left hover:border-cyan-400/20"><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-slate-200">{item.name}</div><div className="mt-1 truncate text-[10px] text-slate-600">{item.model_type || "Model"}{item.base_model ? ` · ${item.base_model}` : ""}{item.creator ? ` · ${item.creator}` : ""}</div></div><Download className="size-4 shrink-0 text-cyan-400" /></button>)}</div>}</div>}
+          {!isCivitai && <><div className="grid gap-2 sm:grid-cols-2"><Input value={includeGlobs} onChange={(event) => updateDraft({ includeGlobs: event.target.value })} placeholder="Include glob，例如 **/*.parquet" /><Input value={excludeGlobs} onChange={(event) => updateDraft({ excludeGlobs: event.target.value })} placeholder="Exclude glob，例如 data/test/**" /></div><div className="text-[11px] leading-5 text-slate-600">多個 glob 可用逗號或換行分隔；重新按「解析」即可預覽套用後的選檔與容量。</div></>}
           {error && <div className="flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
           {repo && <div className="space-y-4 pt-2">
-            <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.repo_id}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
+            <div className="flex flex-wrap items-center gap-2"><Badge className="border-cyan-400/20 bg-cyan-400/10 text-cyan-300">{repo.display_name || repo.repo_id}</Badge><Badge>{repo.provider === "civitai" ? "Civitai" : "Hugging Face"}</Badge><Badge className={repo.repo_type === "dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : ""}>{repo.repo_type === "dataset" ? "Dataset" : "Model"}</Badge><Badge>{repo.version_name || repo.requested_revision}</Badge><span className="font-mono text-[10px] text-slate-600">{repo.commit_hash.slice(0, 12)}</span></div>
+            {repo.provider === "civitai" && repo.versions.length > 0 && <label className="block rounded-lg border border-white/[.07] bg-white/[.025] p-3 text-xs text-slate-400"><span className="mb-2 block font-medium text-slate-300">Model version</span><select className="h-10 w-full rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-200" value={versionId} onChange={(event) => { const next = event.target.value; updateDraft({ versionId: next }); void resolve(Number(next)) }}>{repo.versions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.base_model ? ` · ${version.base_model}` : ""}</option>)}</select></label>}
+            {repo.provider === "civitai" && <div className="rounded-lg border border-cyan-400/15 bg-cyan-400/[.04] p-3 text-xs leading-5 text-slate-400">{String(repo.provider_metadata.model_type || "Model")}{repo.provider_metadata.base_model ? ` · ${String(repo.provider_metadata.base_model)}` : ""}{repo.provider_metadata.creator ? ` · by ${String(repo.provider_metadata.creator)}` : ""}。完成時會驗證 Civitai 提供的 SHA256。</div>}
             {repo.repo_type === "dataset" && repo.files.length >= 100 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.05] p-3 text-xs leading-5 text-amber-200">此 Dataset 含有 {repo.files.length} 個檔案。大量小檔會增加排程與磁碟負擔；可使用 glob 縮小範圍，並在「服務設定」調整同時下載檔案數。</div>}
             <FileTree files={repo.files} selected={selected} onChange={(next) => updateDraft({ selected: next })} />
-            <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
+            <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] p-4 sm:flex-row sm:items-center"><div><div className="text-sm font-medium text-slate-200">已選 {selected.size} / {repo.files.length} 個檔案</div><div className="mt-1 text-xs text-slate-500">合計 {formatBytes(selectedBytes)} · 儲存於 download/{repo.provider === "civitai" ? "civitai/models" : repo.repo_type === "dataset" ? "datasets" : "models"}/</div></div><Button onClick={() => void create()} disabled={busy || !selected.size}><Play className="size-4 fill-current" />建立下載任務</Button></div>
           </div>}
         </CardContent>
       </Card>
@@ -267,7 +300,7 @@ function MetricCard({ icon: Icon, label, value, note }: { icon: typeof Archive; 
 function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
   const active = tasks.filter((task) => task.status !== "completed" && task.status !== "cancelled")
   return <><PageHeading eyebrow="Transfers" title="下載任務" description="即時查看服務端取得進度。暫停會停止排程並終止正在執行的檔案 worker。" action={<div className="flex items-center gap-2 text-xs text-slate-500"><CircleGauge className="size-4 text-cyan-400" />{active.length} active</div>} />
-    <div className="space-y-4">{tasks.length ? tasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="尚無下載任務" text="從「新增下載」解析第一個 Hugging Face repo。" />}</div>
+    <div className="space-y-4">{tasks.length ? tasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="尚無下載任務" text="從「新增下載」解析第一個 Hugging Face 或 Civitai 來源。" />}</div>
   </>
 }
 
@@ -286,7 +319,7 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
   const progress = percent(task.downloaded_bytes, task.total_bytes)
   const command = async (action: "pause" | "resume" | "retry" | "cancel") => {
     setBusy(true); setError("")
-    try { await api.command(task.id, action, token); setToken(""); await refresh() }
+    try { await api.command(task.id, action, task.provider, token); setToken(""); await refresh() }
     catch (reason) { setError(reason instanceof Error ? reason.message : "操作失敗") }
     finally { setBusy(false) }
   }
@@ -304,10 +337,10 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
     catch (reason) { setError(reason instanceof Error ? reason.message : "刪除檔案失敗") }
     finally { setBusy(false) }
   }
-  const inspectRepo = async () => {
+  const inspectRepo = async (versionId?: number) => {
     setBusy(true); setError(""); setEditMessage("")
     try {
-      const result = await api.inspectTask(task.id, editToken)
+      const result = await api.inspectTask(task.id, task.provider, editToken, versionId)
       setInspection(result)
       const available = new Set(result.resolution.files.map((file) => file.path))
       setEditSelected(new Set(result.selected_files.filter((path) => available.has(path))))
@@ -322,7 +355,8 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
     if (!inspection || !editSelected.size) return
     setBusy(true); setError(""); setEditMessage("")
     try {
-      const result = await api.updateTaskConfiguration(task.id, [...editSelected], editToken)
+      const versionId = inspection.resolution.provider === "civitai" ? Number(inspection.resolution.commit_hash) : undefined
+      const result = await api.updateTaskConfiguration(task.id, [...editSelected], task.provider, editToken, versionId)
       setEditToken("")
       setEditMessage(result.created_new ? "已建立更新任務並取代原任務；實體檔案不受影響。" : "任務設定已更新。")
       setEditing(false)
@@ -334,7 +368,7 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
     <div className="p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-center">
         <div className="grid size-11 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-[#0a1016]"><Box className="size-5 text-cyan-400/75" /></div>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.repo_id}</h3><Badge className={meta.className}>Transfer: {meta.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.provider} / {task.repo_type}</span><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-100">{task.display_name || task.repo_id}</h3><Badge className={meta.className}>Transfer: {meta.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-slate-600"><span>{task.provider} / {task.repo_type}</span><span>{task.requested_revision}</span><span className="font-mono">{task.commit_hash.slice(0, 10)}</span><span>{task.files.length} files</span></div></div>
         {isAdmin && <div className="flex items-center gap-1.5">
           <Button variant="secondary" size="sm" disabled={busy} onClick={openEditor}><SettingsIcon className="size-3.5" />編輯</Button>
           {["queued", "downloading"].includes(task.status) && <Button variant="secondary" size="sm" disabled={busy} onClick={() => void command("pause")}><Pause className="size-3.5" />暫停</Button>}
@@ -345,14 +379,14 @@ function TaskCard({ task, isAdmin, refresh }: { task: DownloadTask; isAdmin: boo
           {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="destructive" size="icon" disabled={busy} onClick={() => void removeHistory()} aria-label="只刪除歷史" title="只刪除歷史"><Trash2 className="size-3.5" /></Button>}
         </div>}
       </div>
-      {task.status === "auth_required" && isAdmin && <div className="mt-4 flex gap-2"><Input type="password" autoComplete="off" className="h-9" placeholder="重新提供 HF Token" value={token} onChange={(event) => setToken(event.target.value)} /><Button size="sm" onClick={() => void command("resume")} disabled={!token || busy}>驗證並繼續</Button></div>}
+      {task.status === "auth_required" && isAdmin && <div className="mt-4 flex gap-2"><Input type="password" autoComplete="off" className="h-9" placeholder={`重新提供 ${task.provider === "civitai" ? "Civitai API" : "HF"} Token`} value={token} onChange={(event) => setToken(event.target.value)} /><Button size="sm" onClick={() => void command("resume")} disabled={!token || busy}>驗證並繼續</Button></div>}
       <div className="mt-5"><div className="mb-2 flex flex-wrap justify-between gap-2 text-xs"><span className="text-slate-500">{formatBytes(task.downloaded_bytes)} / {formatBytes(task.total_bytes)}</span><span className="flex gap-3 font-mono text-slate-500"><span>{task.status === "downloading" ? `${formatBytes(task.speed_bps)}/s` : "— B/s"}</span><span>ETA {task.status === "downloading" ? formatEta(task.eta_seconds) : "—"}</span><span className="text-slate-300">{progress}%</span></span></div><Progress value={progress} /></div>
       {(error || task.error) && <div className="mt-3 text-xs text-rose-300">{error || task.error}</div>}
       {editMessage && <div className="mt-3 text-xs text-emerald-300">{editMessage}</div>}
       {editing && <div className="mt-4 space-y-4 rounded-xl border border-cyan-400/15 bg-cyan-400/[.035] p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="text-sm font-semibold text-slate-200">編輯下載任務</div><div className="mt-1 text-xs text-slate-500">重新解析 {task.repo_id} / {task.requested_revision}，檢查遠端 commit 與完整檔案樹。</div></div><Button variant="ghost" size="sm" onClick={() => { setEditing(false); setEditToken("") }}>關閉</Button></div>
-        <div className="flex flex-col gap-2 sm:flex-row"><div className="relative min-w-0 flex-1"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={editToken} onChange={(event) => setEditToken(event.target.value)} placeholder={task.requires_token ? "輸入 HF Token 後重新檢查" : "HF Token（選填，只存於記憶體）"} /></div><Button variant="secondary" onClick={() => void inspectRepo()} disabled={busy || (task.requires_token && !editToken)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}檢查 Repo</Button></div>
-        {inspection && <><div className="flex flex-wrap items-center gap-2 text-xs"><Badge>{inspection.resolution.requested_revision}</Badge><span className="font-mono text-slate-500">目前 {task.commit_hash.slice(0, 12)}</span><span className="text-slate-600">→</span><span className="font-mono text-slate-300">遠端 {inspection.resolution.commit_hash.slice(0, 12)}</span>{inspection.update_available ? <Badge className="border-amber-400/20 bg-amber-400/10 text-amber-300">Repo 有更新</Badge> : <Badge className="border-emerald-400/20 bg-emerald-400/10 text-emerald-300">已是最新 commit</Badge>}</div>{inspection.unavailable_selected_files.length > 0 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.06] p-3 text-xs text-amber-200">原任務有 {inspection.unavailable_selected_files.length} 個檔案已不在目前 repo：{inspection.unavailable_selected_files.join(", ")}</div>}<FileTree files={inspection.resolution.files} selected={editSelected} onChange={setEditSelected} /><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="text-xs text-slate-500">已選 {editSelected.size} / {inspection.resolution.files.length} 個檔案。{["downloading", "pausing"].includes(task.status) ? "請先暫停目前下載，再修改設定。" : inspection.can_update_in_place ? "將更新目前任務。" : "儲存時會建立新任務並取代原任務；舊實體檔案不會刪除。"}</div><Button onClick={() => void saveConfiguration()} disabled={busy || !editSelected.size || ["downloading", "pausing"].includes(task.status)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{["downloading", "pausing"].includes(task.status) ? "請先暫停" : inspection.can_update_in_place ? "儲存設定" : "建立更新任務"}</Button></div></>}
+        <div className="flex flex-col gap-2 sm:flex-row"><div className="relative min-w-0 flex-1"><KeyRound className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-600" /><Input className="pl-10" type="password" autoComplete="off" value={editToken} onChange={(event) => setEditToken(event.target.value)} placeholder={task.requires_token ? `輸入 ${task.provider === "civitai" ? "Civitai API" : "HF"} Token 後重新檢查` : `${task.provider === "civitai" ? "Civitai API" : "HF"} Token（選填，只存於記憶體）`} /></div><Button variant="secondary" onClick={() => void inspectRepo()} disabled={busy || (task.requires_token && !editToken)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}檢查來源</Button></div>
+        {inspection && <>{inspection.resolution.provider === "civitai" && inspection.resolution.versions.length > 0 && <select className="h-10 w-full rounded-lg border border-white/10 bg-[#0a1016] px-3 text-sm text-slate-200" value={inspection.resolution.commit_hash} onChange={(event) => void inspectRepo(Number(event.target.value))}>{inspection.resolution.versions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.base_model ? ` · ${version.base_model}` : ""}</option>)}</select>}<div className="flex flex-wrap items-center gap-2 text-xs"><Badge>{inspection.resolution.version_name || inspection.resolution.requested_revision}</Badge><span className="font-mono text-slate-500">目前 {task.commit_hash.slice(0, 12)}</span><span className="text-slate-600">→</span><span className="font-mono text-slate-300">遠端 {inspection.resolution.commit_hash.slice(0, 12)}</span>{inspection.update_available ? <Badge className="border-amber-400/20 bg-amber-400/10 text-amber-300">來源有更新</Badge> : <Badge className="border-emerald-400/20 bg-emerald-400/10 text-emerald-300">已是相同版本</Badge>}</div>{inspection.unavailable_selected_files.length > 0 && <div className="rounded-lg border border-amber-400/15 bg-amber-400/[.06] p-3 text-xs text-amber-200">原任務有 {inspection.unavailable_selected_files.length} 個檔案已不在目前來源：{inspection.unavailable_selected_files.join(", ")}</div>}<FileTree files={inspection.resolution.files} selected={editSelected} onChange={setEditSelected} /><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="text-xs text-slate-500">已選 {editSelected.size} / {inspection.resolution.files.length} 個檔案。{["downloading", "pausing"].includes(task.status) ? "請先暫停目前下載，再修改設定。" : inspection.can_update_in_place ? "將更新目前任務。" : "儲存時會建立新任務並取代原任務；舊實體檔案不會刪除。"}</div><Button onClick={() => void saveConfiguration()} disabled={busy || !editSelected.size || ["downloading", "pausing"].includes(task.status)}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{["downloading", "pausing"].includes(task.status) ? "請先暫停" : inspection.can_update_in_place ? "儲存設定" : "建立更新任務"}</Button></div></>}
       </div>}
       <button onClick={() => setExpanded(!expanded)} className="mt-4 flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300"><ChevronDown className={cn("size-3.5 transition-transform", expanded && "rotate-180")} />{expanded ? "收合檔案" : "查看檔案"}</button>
     </div>
@@ -380,23 +414,23 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
   const restore = async (item: LibraryItem) => {
     let token = ""
     if (item.requires_token) {
-      token = window.prompt("此下載需要 Hugging Face Token。Token 只會保留在記憶體中。") ?? ""
+      token = window.prompt(`此下載需要 ${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token。Token 只會保留在記憶體中。`) ?? ""
       if (!token) return
     }
     setRestoringId(item.key); setError("")
     try {
-      for (const recordId of item.restore_record_ids) await api.redownloadMissing(recordId, token)
+      for (const recordId of item.restore_record_ids) await api.redownloadMissing(recordId, item.provider, token)
       await refresh()
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "重新下載失敗") }
     finally { setRestoringId(null) }
   }
-  return <><PageHeading eyebrow="Content library" title="Model／Dataset 與本機狀態" description="Model 與 Dataset identity 分開；同一來源、commit 與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
+  return <><PageHeading eyebrow="Content library" title="Model／Dataset 與本機狀態" description="Hugging Face Model／Dataset 與 Civitai version identity 分開；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
     <div className="grid gap-4 md:grid-cols-2">{items.length ? items.map((item) => {
       const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
       const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
-      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{item.provider} / {item.repo_type} / {item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+      return <Card key={item.key}><CardHeader><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3><div className="mt-1 font-mono text-[10px] text-slate-600">{item.provider} / {item.repo_type} / {item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => void restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
     }) : <div className="md:col-span-2"><EmptyState icon={Library} title="內容庫還是空的" text="至少完成一個 Model 或 Dataset 檔案後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
 }
@@ -416,6 +450,7 @@ function SettingsPage({ isAdmin }: { isAdmin: boolean }) {
     {!isAdmin && <Card className="mb-5 border-amber-400/15 bg-amber-400/[.04]"><CardContent className="flex items-center gap-3 p-4 text-sm text-amber-200"><ShieldCheck className="size-5" />目前是訪客連線；設定為唯讀。</CardContent></Card>}
     {settings && <Card className="max-w-2xl"><CardHeader><h2 className="font-semibold text-white">下載與儲存</h2></CardHeader><CardContent className="space-y-5">
       <SettingField label="同時下載檔案數" note="全服務共用的 worker 上限"><Input type="number" min={1} max={16} value={settings.max_concurrent_files} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, max_concurrent_files: Number(e.target.value) })} /></SettingField>
+      <SettingField label="Civitai 分段數" note="支援 Range 時每個檔案使用 1–8 段；不支援時自動退回單串流"><Input type="number" min={1} max={8} value={settings.civitai_segments} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, civitai_segments: Number(e.target.value) })} /></SettingField>
       <SettingField label="容量上限（GiB）" note="0 代表不限容量"><Input type="number" min={0} value={Math.round(settings.max_storage_bytes / 1024 ** 3)} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, max_storage_bytes: Number(e.target.value) * 1024 ** 3 })} /></SettingField>
       <SettingField label="磁碟安全保留（GiB）" note="低於此空間時拒絕新任務"><Input type="number" min={0} value={Math.round(settings.min_free_bytes / 1024 ** 3)} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, min_free_bytes: Number(e.target.value) * 1024 ** 3 })} /></SettingField>
       <SettingField label="保留天數" note="0 代表不自動過期；自動清理將於後續版本啟用"><Input type="number" min={0} value={settings.retention_days} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, retention_days: Number(e.target.value) })} /></SettingField>

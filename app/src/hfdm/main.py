@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import create_router
+from .civitai_service import CivitaiService
 from .config import AppPaths
 from .database import Database
 from .download_manager import DownloadManager
@@ -85,6 +86,7 @@ def create_app(paths: AppPaths | None = None) -> FastAPI:
     db.initialize()
     broker = EventBroker()
     hf = HuggingFaceService()
+    civitai = CivitaiService()
     manager = DownloadManager(app_paths, db, broker)
 
     @asynccontextmanager
@@ -102,7 +104,7 @@ def create_app(paths: AppPaths | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(create_router(db, hf, manager, broker))
+    app.include_router(create_router(db, hf, civitai, manager, broker))
     app.state.paths = app_paths
     app.state.db = db
     app.state.manager = manager

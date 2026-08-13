@@ -74,3 +74,26 @@ def test_failed_migration_rolls_back_schema_and_keeps_backup(tmp_path: Path, mon
     assert "tasks" in tables
     assert "migration_should_rollback" not in tables
     assert "schema_version" not in tables
+
+
+def test_v2_to_v3_migration_creates_distinct_backup(tmp_path: Path) -> None:
+    database = tmp_path / "data" / "hfdm.sqlite3"
+    db = Database(database)
+    db.initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE schema_version SET version=2 WHERE id=1")
+
+    Database(database).initialize()
+
+    migrated = Database(database)
+    assert migrated.schema_version() == SCHEMA_VERSION
+    assert migrated.v2_backup_path.is_file()
+    with sqlite3.connect(database) as conn:
+        record_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(download_records)").fetchall()
+        }
+        file_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(download_record_files)").fetchall()
+        }
+    assert {"display_name", "provider_metadata"} <= record_columns
+    assert {"remote_id", "download_url", "provider_metadata"} <= file_columns

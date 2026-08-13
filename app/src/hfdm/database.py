@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from .config import DEFAULT_SETTINGS
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TERMINAL_TRANSFER_STATUSES = {"completed", "failed", "cancelled"}
 
 
@@ -34,7 +34,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existed = self.path.exists() and self.path.stat().st_size > 0
         if existed and self._requires_v2_migration():
-            self._backup_v1_database()
+            self._backup_database(self._source_schema_version())
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -62,6 +62,10 @@ class Database:
                     size INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                    remote_id TEXT,
+                    expected_sha256 TEXT,
+                    download_url TEXT,
+                    provider_metadata TEXT NOT NULL DEFAULT '{}',
                     error TEXT,
                     UNIQUE(task_id, path)
                 );
@@ -102,6 +106,14 @@ class Database:
     def v1_backup_path(self) -> Path:
         return self.path.with_name(f"{self.path.name}.v1.bak")
 
+    @property
+    def v2_backup_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.v2.bak")
+
+    def _source_schema_version(self) -> int:
+        with sqlite3.connect(self.path) as conn:
+            return self._schema_version(conn)
+
     def _requires_v2_migration(self) -> bool:
         with sqlite3.connect(self.path) as conn:
             tables = {
@@ -115,8 +127,8 @@ class Database:
             row = conn.execute("SELECT version FROM schema_version WHERE id=1").fetchone()
             return row is None or int(row[0]) < SCHEMA_VERSION
 
-    def _backup_v1_database(self) -> None:
-        backup_path = self.v1_backup_path
+    def _backup_database(self, source_version: int) -> None:
+        backup_path = self.path.with_name(f"{self.path.name}.v{source_version}.bak")
         if backup_path.exists():
             return
         with sqlite3.connect(self.path) as source, sqlite3.connect(backup_path) as target:
@@ -151,6 +163,8 @@ class Database:
                 speed_bps REAL NOT NULL DEFAULT 0,
                 eta_seconds INTEGER,
                 requires_token INTEGER NOT NULL DEFAULT 0,
+                display_name TEXT,
+                provider_metadata TEXT NOT NULL DEFAULT '{}',
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -181,6 +195,9 @@ class Database:
                 path TEXT NOT NULL,
                 expected_size INTEGER NOT NULL DEFAULT 0,
                 expected_sha256 TEXT,
+                remote_id TEXT,
+                download_url TEXT,
+                provider_metadata TEXT NOT NULL DEFAULT '{}',
                 transfer_status TEXT NOT NULL,
                 downloaded_bytes INTEGER NOT NULL DEFAULT 0,
                 local_status TEXT NOT NULL DEFAULT 'unknown',
@@ -199,6 +216,8 @@ class Database:
         )
         for statement in statements:
             conn.execute(statement)
+
+        self._migrate_to_v3(conn)
 
         task_rows = conn.execute("SELECT * FROM tasks").fetchall()
         for task in task_rows:
@@ -247,6 +266,33 @@ class Database:
             (SCHEMA_VERSION,),
         )
 
+    @staticmethod
+    def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+        additions = {
+            "task_files": {
+                "remote_id": "TEXT",
+                "expected_sha256": "TEXT",
+                "download_url": "TEXT",
+                "provider_metadata": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "download_records": {
+                "display_name": "TEXT",
+                "provider_metadata": "TEXT NOT NULL DEFAULT '{}'",
+            },
+            "download_record_files": {
+                "remote_id": "TEXT",
+                "download_url": "TEXT",
+                "provider_metadata": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        }
+        for table, columns in additions.items():
+            existing = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, declaration in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
     def recover_interrupted(self) -> None:
         now = utc_now()
         with self._write_lock, self.connect() as conn:
@@ -279,7 +325,25 @@ class Database:
                 )
 
     def create_task(self, task: dict[str, Any], files: Iterable[dict[str, Any]]) -> None:
-        file_rows = list(files)
+        file_rows = [
+            {
+                "remote_id": None,
+                "expected_sha256": None,
+                "download_url": None,
+                "provider_metadata": "{}",
+                **file,
+                "provider_metadata": self._json_text(file.get("provider_metadata", {})),
+            }
+            for file in files
+        ]
+        task_values = {
+            "provider": "huggingface",
+            "repo_type": "model",
+            "display_name": None,
+            "provider_metadata": "{}",
+            **task,
+            "provider_metadata": self._json_text(task.get("provider_metadata", {})),
+        }
         with self._write_lock, self.connect() as conn:
             conn.execute(
                 """
@@ -291,12 +355,17 @@ class Database:
                     :total_bytes, 0, :requires_token, NULL, :created_at, :updated_at
                 )
                 """,
-                task,
+                task_values,
             )
             conn.executemany(
                 """
-                INSERT INTO task_files(id, task_id, path, size, status, downloaded_bytes, error)
-                VALUES (:id, :task_id, :path, :size, :status, 0, NULL)
+                INSERT INTO task_files(
+                    id, task_id, path, size, status, downloaded_bytes, remote_id,
+                    expected_sha256, download_url, provider_metadata, error
+                ) VALUES (
+                    :id, :task_id, :path, :size, :status, 0, :remote_id,
+                    :expected_sha256, :download_url, :provider_metadata, NULL
+                )
                 """,
                 file_rows,
             )
@@ -305,18 +374,15 @@ class Database:
                 INSERT INTO download_records(
                     id, provider, repo_type, remote_id, requested_revision, resolved_revision,
                     destination, transfer_status, local_availability, total_bytes,
-                    downloaded_bytes, requires_token, error, created_at, updated_at
+                    downloaded_bytes, requires_token, display_name, provider_metadata,
+                    error, created_at, updated_at
                 ) VALUES (
                     :id, :provider, :repo_type, :repo_id, :requested_revision, :commit_hash,
                     :destination, :status, 'unknown', :total_bytes, 0, :requires_token,
-                    NULL, :created_at, :updated_at
+                    :display_name, :provider_metadata, NULL, :created_at, :updated_at
                 )
                 """,
-                {
-                    "provider": "huggingface",
-                    "repo_type": task.get("repo_type", "model"),
-                    **task,
-                },
+                task_values,
             )
             conn.execute(
                 """
@@ -329,8 +395,12 @@ class Database:
             conn.executemany(
                 """
                 INSERT INTO download_record_files(
-                    id, record_id, path, expected_size, transfer_status, downloaded_bytes, error
-                ) VALUES (:id, :task_id, :path, :size, :status, 0, NULL)
+                    id, record_id, path, expected_size, expected_sha256, remote_id,
+                    download_url, provider_metadata, transfer_status, downloaded_bytes, error
+                ) VALUES (
+                    :id, :task_id, :path, :size, :expected_sha256, :remote_id,
+                    :download_url, :provider_metadata, :status, 0, NULL
+                )
                 """,
                 file_rows,
             )
@@ -426,6 +496,7 @@ class Database:
                         "history_count": len(group_records),
                         "total_bytes": sum(int(file["size"]) for file in files),
                         "requires_token": any(bool(record["requires_token"]) for record in group_records),
+                        "display_name": latest["display_name"],
                         "restore_record_ids": sorted(restore_record_ids),
                         "files": files,
                         "updated_at": latest["updated_at"],
@@ -447,11 +518,13 @@ class Database:
         task["commit_hash"] = task.pop("resolved_revision")
         task["status"] = task["transfer_status"]
         task["requires_token"] = bool(task["requires_token"])
+        task["provider_metadata"] = self._json_object(task.get("provider_metadata"))
         task["files"] = [
             {
                 **dict(item),
                 "size": item["expected_size"],
                 "status": item["transfer_status"],
+                "provider_metadata": self._json_object(item["provider_metadata"]),
             }
             for item in conn.execute(
                 "SELECT * FROM download_record_files WHERE record_id=? ORDER BY path", (task["id"],)
@@ -480,7 +553,11 @@ class Database:
                 "SELECT * FROM task_files WHERE task_id=? AND status='queued' ORDER BY path LIMIT 1",
                 (task_id,),
             ).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            item = dict(row)
+            item["provider_metadata"] = self._json_object(item.get("provider_metadata"))
+            return item
 
     def get_file(self, task_id: str, path: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -492,6 +569,7 @@ class Database:
             file = dict(row)
             file["size"] = file["expected_size"]
             file["status"] = file["transfer_status"]
+            file["provider_metadata"] = self._json_object(file.get("provider_metadata"))
             return file
 
     def update_task(self, task_id: str, **values: Any) -> None:
@@ -633,7 +711,7 @@ class Database:
                 for row in conn.execute(
                     """
                     SELECT id, repo_type, remote_id AS repo_id,
-                           resolved_revision AS commit_hash, destination
+                           resolved_revision AS commit_hash, destination, provider
                     FROM download_records
                     """
                 ).fetchall()
@@ -776,7 +854,17 @@ class Database:
         *,
         requires_token: bool | None,
     ) -> None:
-        file_rows = list(files)
+        file_rows = [
+            {
+                "remote_id": None,
+                "expected_sha256": None,
+                "download_url": None,
+                "provider_metadata": "{}",
+                **file,
+                "provider_metadata": self._json_text(file.get("provider_metadata", {})),
+            }
+            for file in files
+        ]
         now = utc_now()
         total = sum(int(file["size"]) for file in file_rows)
         downloaded = sum(int(file["downloaded_bytes"]) for file in file_rows)
@@ -790,8 +878,13 @@ class Database:
             conn.execute("DELETE FROM download_record_files WHERE record_id=?", (task_id,))
             conn.executemany(
                 """
-                INSERT INTO task_files(id, task_id, path, size, status, downloaded_bytes, error)
-                VALUES (:id, :task_id, :path, :size, :status, :downloaded_bytes, :error)
+                INSERT INTO task_files(
+                    id, task_id, path, size, status, downloaded_bytes, remote_id,
+                    expected_sha256, download_url, provider_metadata, error
+                ) VALUES (
+                    :id, :task_id, :path, :size, :status, :downloaded_bytes, :remote_id,
+                    :expected_sha256, :download_url, :provider_metadata, :error
+                )
                 """,
                 file_rows,
             )
@@ -800,11 +893,13 @@ class Database:
                 INSERT INTO download_record_files(
                     id, record_id, path, expected_size, transfer_status,
                     downloaded_bytes, local_status, observed_size,
-                    observed_mtime_ns, observed_sha256, last_reconciled_at, error
+                    observed_mtime_ns, observed_sha256, last_reconciled_at, error,
+                    expected_sha256, remote_id, download_url, provider_metadata
                 ) VALUES (
                     :id, :task_id, :path, :size, :status,
                     :downloaded_bytes, :local_status, :observed_size,
-                    :observed_mtime_ns, :observed_sha256, :last_reconciled_at, :error
+                    :observed_mtime_ns, :observed_sha256, :last_reconciled_at, :error,
+                    :expected_sha256, :remote_id, :download_url, :provider_metadata
                 )
                 """,
                 file_rows,
@@ -897,3 +992,26 @@ class Database:
                     (updated_before,),
                 ).fetchall()
             ]
+
+    @staticmethod
+    def _json_text(value: Any) -> str:
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = {}
+        else:
+            parsed = value
+        return json.dumps(parsed if isinstance(parsed, dict) else {}, separators=(",", ":"))
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(str(value))
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}

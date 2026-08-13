@@ -9,6 +9,8 @@ from typing import Any
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
+from .civitai_download import download_civitai_file
+
 
 def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
@@ -36,6 +38,10 @@ class JsonTqdm(tqdm):
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
+        if payload.get("provider") == "civitai":
+            download_civitai_file(payload, emit)
+            emit({"type": "complete", "path": payload["filename"]})
+            return 0
         path = hf_hub_download(
             repo_id=payload["repo_id"],
             filename=payload["filename"],

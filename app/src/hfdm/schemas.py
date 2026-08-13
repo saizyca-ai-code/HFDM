@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -21,11 +21,14 @@ TaskStatus = Literal[
 
 LocalAvailability = Literal["available", "partial", "moved", "changed", "unknown"]
 RepoType = Literal["model", "dataset"]
+Provider = Literal["huggingface", "civitai"]
 
 
 class RepoResolveRequest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
+    civitai_version_id: int | None = Field(default=None, ge=1)
     include_globs: list[str] = Field(default_factory=list, max_length=32)
     exclude_globs: list[str] = Field(default_factory=list, max_length=32)
 
@@ -34,9 +37,55 @@ class RepoFileInfo(BaseModel):
     path: str
     size: int = 0
     lfs: bool = False
+    remote_id: str | None = None
+    sha256: str | None = None
+    primary: bool = False
+    file_type: str | None = None
+    format: str | None = None
+    precision: str | None = None
+    scan_status: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceVersionInfo(BaseModel):
+    id: str
+    name: str
+    base_model: str | None = None
+    created_at: datetime | None = None
+
+
+class CivitaiSearchRequest(BaseModel):
+    query: str | None = Field(default=None, max_length=200)
+    tag: str | None = Field(default=None, max_length=100)
+    username: str | None = Field(default=None, max_length=100)
+    types: list[str] = Field(default_factory=list, max_length=16)
+    base_models: list[str] = Field(default_factory=list, max_length=16)
+    sort: Literal["Highest Rated", "Most Downloaded", "Newest"] = "Most Downloaded"
+    period: Literal["AllTime", "Year", "Month", "Week", "Day"] = "AllTime"
+    page: int = Field(default=1, ge=1)
+    limit: int = Field(default=20, ge=1, le=50)
+    civitai_token: SecretStr | None = None
+
+
+class CivitaiSearchItem(BaseModel):
+    id: int
+    name: str
+    model_type: str | None = None
+    creator: str | None = None
+    latest_version_id: int | None = None
+    base_model: str | None = None
+    preview_url: str | None = None
+
+
+class CivitaiSearchResult(BaseModel):
+    items: list[CivitaiSearchItem]
+    current_page: int = 1
+    total_pages: int = 1
+    next_page: int | None = None
 
 
 class RepoResolution(BaseModel):
+    provider: Provider = "huggingface"
     repo_id: str
     repo_type: RepoType = "model"
     requested_revision: str
@@ -44,29 +93,41 @@ class RepoResolution(BaseModel):
     files: list[RepoFileInfo]
     total_bytes: int
     suggested_files: list[str] = Field(default_factory=list)
+    display_name: str | None = None
+    version_name: str | None = None
+    versions: list[SourceVersionInfo] = Field(default_factory=list)
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateTaskRequest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
     selected_files: list[str] = Field(min_length=1)
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
+    civitai_version_id: int | None = Field(default=None, ge=1)
 
 
 class ResumeTaskRequest(BaseModel):
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
 
 
 class RedownloadTaskRequest(BaseModel):
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
 
 
 class InspectTaskRequest(BaseModel):
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
+    civitai_version_id: int | None = Field(default=None, ge=1)
 
 
 class UpdateTaskConfigurationRequest(BaseModel):
     selected_files: list[str] = Field(min_length=1)
     hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
+    civitai_version_id: int | None = Field(default=None, ge=1)
 
 
 class TaskFileView(BaseModel):
@@ -79,6 +140,9 @@ class TaskFileView(BaseModel):
     local_status: LocalAvailability = "unknown"
     observed_size: int | None = None
     observed_mtime_ns: int | None = None
+    remote_id: str | None = None
+    expected_sha256: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskView(BaseModel):
@@ -101,6 +165,8 @@ class TaskView(BaseModel):
     completed_at: datetime | None = None
     last_reconciled_at: datetime | None = None
     error: str | None = None
+    display_name: str | None = None
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
     files: list[TaskFileView] = Field(default_factory=list)
 
 
@@ -141,6 +207,7 @@ class LibraryItemView(BaseModel):
     history_count: int
     total_bytes: int
     requires_token: bool
+    display_name: str | None = None
     restore_record_ids: list[str] = Field(default_factory=list)
     files: list[LibraryFileView] = Field(default_factory=list)
 
@@ -151,6 +218,7 @@ class AppSettingsView(BaseModel):
     min_free_bytes: int = Field(ge=0)
     retention_days: int = Field(ge=0)
     allow_delete_files: bool = True
+    civitai_segments: int = Field(default=4, ge=1, le=8)
 
 
 class IdentityView(BaseModel):
