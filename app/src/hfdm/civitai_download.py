@@ -43,6 +43,7 @@ def download_civitai_file(
     emit: Callable[[dict[str, Any]], None],
     *,
     opener: Callable[..., Any] = _DEFAULT_OPENER,
+    benchmark_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     destination = Path(payload["destination"])
     target = (destination / Path(payload["filename"])).resolve()
@@ -85,6 +86,8 @@ def download_civitai_file(
     _write_state(meta, state)
 
     range_supported, discovered_size, validator = _probe(download_url, token, opener)
+    if benchmark_observer:
+        benchmark_observer({"range_supported": range_supported, "fallback": False})
     if expected_size <= 0:
         expected_size = discovered_size
         state["expected_size"] = expected_size
@@ -99,6 +102,8 @@ def download_civitai_file(
                 download_url, token, part, expected_size, segment_count, validator, emit, opener
             )
         except RangeUnsupported:
+            if benchmark_observer:
+                benchmark_observer({"range_supported": True, "fallback": True})
             _clear_segment_files(part)
             _download_single(download_url, token, part, expected_size, validator, emit, opener)
     else:

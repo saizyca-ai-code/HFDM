@@ -1,33 +1,49 @@
-# HFDM V2 transfer benchmark design
+# HFDM V2 transfer benchmarks
 
-Phase 0 defines the workloads and measurement contract; provider implementations and live benchmark execution belong to their later phases.
+These opt-in harnesses compare the Phase 4 Model, Dataset, and Civitai workloads without writing HFDM's production database or `download/` directory. Immutable public identities and expected selections live in `manifest.json`; every live run rejects metadata drift before downloading.
 
-Phase 2 adds an opt-in Hugging Face harness at `benchmark_huggingface.py`. It resolves both Model and Dataset references through the production provider, applies the same include/exclude glob semantics, passes the immutable commit and repo type to `hf_hub_download`, and records comparable JSON metrics. It never reads a token from arguments; gated/private runs may use the process-only `HF_TOKEN` environment variable.
+## Safety and preparation
 
-Example from the repository root:
+- Use a dedicated destination outside the repository and production portable directory. Harnesses never delete it.
+- Plan for 55–60 GiB of network transfer and at least 70 GiB free space for the confirmed matrix.
+- Use `--dry-run` first, then `--resolve-only` to validate current public metadata without transferring model content.
+- Record the real destination media with `--disk-type ssd` or `hdd`, plus a non-secret `--network-label`.
+- Public fixtures need no token. If replacements require credentials, provide process-only `HF_TOKEN` or `CIVITAI_TOKEN`; never pass tokens as arguments.
+- A cold run needs a fresh provider cache and an empty destination. Cache preparation is intentionally manual and non-destructive.
+
+## Fixed workloads
+
+- `hf-model-large`: Whisper Large V3 Turbo `model.safetensors`, 1,617,824,864 bytes.
+- `hf-dataset-small`: FLEURS 306 TSV files, 285,358,149 bytes.
+- `hf-dataset-mixed`: FLEURS Icelandic and Oromo TSV/audio files, 12 files and 1,848,207,780 bytes.
+- `civitai-large`: DreamShaper 8 file ID `93211`, 2,132,625,894 bytes with fixed SHA256.
+
+## Examples
+
+From the repository root:
 
 ```powershell
 .\python_embed\python.exe app\tests\benchmarks\benchmark_huggingface.py `
-  https://huggingface.co/datasets/owner/repo `
-  I:\benchmarks\hfdm-dataset `
-  --profile balanced --concurrency 4 `
-  --include "data/**/*.parquet" --exclude "data/test/**"
+  --workload hf-model-large --profile balanced --concurrency 1 `
+  --run-number 1 --cache-mode cold --disk-type ssd `
+  --network-label "wired-1g" --resolve-only I:\benchmarks\hfdm-v2
+
+.\python_embed\python.exe app\tests\benchmarks\benchmark_civitai.py `
+  --segments 4 --run-number 1 --cache-mode cold --disk-type ssd `
+  --network-label "wired-1g" --output I:\benchmarks\results\civitai-s4-r1.json `
+  I:\benchmarks\hfdm-v2\civitai-s4-r1
 ```
 
-Use a dedicated destination and retain each JSON result with the machine, network, disk, cold/warm-cache, and run-number metadata. The harness does not delete benchmark data.
+Use a distinct empty destination per cold run. Keep every JSON result, including failures.
 
-## Workloads
+## Confirmed matrix
 
-1. Hugging Face Model large-file workload: one public immutable revision containing a multi-gigabyte LFS/Xet file. Compare balanced, maximum, and HDD profiles.
-2. Hugging Face Dataset many-file workload: one public immutable revision with at least 1,000 mixed small files and representative larger shards. Measure metadata, queue, download, and reconciliation overhead separately.
-3. Civitai large-file workload: one stable public model-version file. Compare 1/2/4/8 HTTP ranges only after the Phase 3 provider exists; Phase 0 does not call or implement Civitai.
+1. HF Model: `balanced`, `maximum`, and `hdd`, concurrency 1; three cold runs per cell.
+2. Dataset small: `balanced` with concurrency 1/2/4/8; select a worker count, then compare the three profiles.
+3. Dataset mixed: compare all three profiles at the selected worker count.
+4. Civitai: 1/2/4/8 segments; three cold runs per cell.
+5. Keep HF warm-cache and Civitai interrupted-resume runs separate from cold throughput ranking.
 
-## Recorded fields
+Results include identity, bytes, TTFB, elapsed/average/peak rates, CPU time, peak RSS on Windows, Range/fallback state for Civitai, and stat-based reconciliation duration. `retry_count` remains `null` where the provider does not expose a trustworthy count.
 
-- provider, repo type, immutable revision/version and selected file count;
-- expected and transferred bytes, time to first byte, elapsed time;
-- average and peak bytes per second, retry count and terminal result;
-- CPU, peak process memory, disk type and reconciliation duration;
-- profile, concurrency/segment count and whether a fallback occurred.
-
-Run each cold and warm-cache case at least three times. Do not infer Dataset defaults from the Model workload or publish tokens, signed URLs, or private repository identifiers.
+Choose the lowest-resource setting with 100% success whose median throughput is at least 90% of the workload's fastest median. `maximum` replaces `balanced` only if Model and Dataset mixed workloads both improve by at least 15% without failures or abnormal resource use. HDD results apply only to rotating disks.

@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
+import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
 from hfdm.hf_service import HuggingFaceService
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from benchmark_common import (
+    ResourceSampler,
+    add_common_arguments,
+    load_workload,
+    publish_result,
+    reconcile_files,
+    resource_result,
+    result_envelope,
+)
 
 
 class ProgressMetrics:
@@ -38,13 +50,13 @@ class ProgressMetrics:
 class MetricTqdm(tqdm):
     recorder: ProgressMetrics
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any):
         kwargs["disable"] = True
         self._metric_n = 0
         self._metric_at = time.perf_counter()
         super().__init__(*args, **kwargs)
 
-    def update(self, n=1):
+    def update(self, n: int | float = 1):
         result = super().update(n)
         now = time.perf_counter()
         current = int(self.n)
@@ -74,73 +86,110 @@ def xet_profile(profile: str) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def parse_patterns(values: list[str]) -> list[str]:
-    return [pattern for value in values for pattern in value.split(",") if pattern.strip()]
+def select_files(files: list[Any], selector: dict[str, Any]) -> list[Any]:
+    paths = set(selector.get("paths") or [])
+    prefixes = tuple(selector.get("prefixes") or [])
+    expression = re.compile(selector["regex"]) if selector.get("regex") else None
+    return [
+        item
+        for item in files
+        if (paths and item.path in paths)
+        or (prefixes and item.path.startswith(prefixes))
+        or (expression and expression.fullmatch(item.path))
+    ]
+
+
+def validate_selection(workload: dict[str, Any], resolution: Any, files: list[Any]) -> None:
+    expected = (workload["file_count"], workload["expected_bytes"])
+    actual = (len(files), sum(item.size for item in files))
+    if resolution.repo_id != workload["repo_id"] or resolution.commit_hash != workload["commit_hash"]:
+        raise RuntimeError("Resolved Hugging Face identity does not match the manifest")
+    if actual != expected:
+        raise RuntimeError(f"Selected files changed: expected {expected}, received {actual}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="HFDM Hugging Face Model/Dataset benchmark")
-    parser.add_argument("source", help="Model ID/URL or Dataset ID/URL")
-    parser.add_argument("destination", type=Path, help="Dedicated benchmark download directory")
+    parser = argparse.ArgumentParser(description="HFDM Hugging Face benchmark")
+    parser.add_argument("--workload", choices=("hf-model-large", "hf-dataset-small", "hf-dataset-mixed"), required=True)
     parser.add_argument("--profile", choices=("balanced", "maximum", "hdd"), default="balanced")
-    parser.add_argument("--concurrency", type=int, choices=range(1, 17), default=4)
-    parser.add_argument("--include", action="append", default=[])
-    parser.add_argument("--exclude", action="append", default=[])
+    parser.add_argument("--concurrency", type=int, choices=range(1, 17), default=1)
+    add_common_arguments(parser)
     args = parser.parse_args()
+    workload = load_workload(args.workload, "huggingface")
+    args.destination.mkdir(parents=True, exist_ok=True)
+    result = result_envelope(args, workload, args.destination)
+    result.update({"provider": "huggingface", "profile": args.profile, "concurrency": args.concurrency})
+    if args.dry_run:
+        result["terminal_result"] = "planned"
+        publish_result(result, args.output)
+        return 0
 
     token = os.getenv("HF_TOKEN") or None
-    include = parse_patterns(args.include)
-    exclude = parse_patterns(args.exclude)
-    resolution = HuggingFaceService().resolve(args.source, token, include, exclude)
-    selected = set(resolution.suggested_files)
-    files = [item for item in resolution.files if item.path in selected]
-    if not files:
-        parser.error("glob selection produced no files")
-    args.destination.mkdir(parents=True, exist_ok=True)
-
+    resolve_started = time.perf_counter()
+    try:
+        resolution = HuggingFaceService().resolve(workload["source"], token)
+        resolve_seconds = time.perf_counter() - resolve_started
+        files = select_files(resolution.files, workload["selector"])
+        validate_selection(workload, resolution, files)
+    except BaseException as exc:
+        result.update({"terminal_result": "failed", "error_kind": type(exc).__name__, "error": str(exc)})
+        publish_result(result, args.output)
+        return 1
+    if args.resolve_only:
+        result.update({
+            "repo_id": resolution.repo_id,
+            "commit_hash": resolution.commit_hash,
+            "file_count": len(files),
+            "expected_bytes": sum(item.size for item in files),
+            "metadata_resolve_seconds": resolve_seconds,
+            "terminal_result": "resolved",
+        })
+        publish_result(result, args.output)
+        return 0
     metrics = ProgressMetrics()
     MetricTqdm.recorder = metrics
 
-    def download(path: str) -> str:
+    def download(item: Any) -> str:
         return hf_hub_download(
             repo_id=resolution.repo_id,
             repo_type=resolution.repo_type,
-            filename=path,
+            filename=item.path,
             revision=resolution.commit_hash,
             local_dir=args.destination,
             token=token or False,
             tqdm_class=MetricTqdm,
         )
 
-    with xet_profile(args.profile):
-        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-            list(pool.map(download, [item.path for item in files]))
-
-    finished_at = time.perf_counter()
-    elapsed = max(finished_at - metrics.started_at, 0.001)
-    expected_bytes = sum(item.size for item in files)
-    result = {
-        "provider": "huggingface",
-        "repo_type": resolution.repo_type,
-        "repo_id": resolution.repo_id,
-        "requested_revision": resolution.requested_revision,
-        "commit_hash": resolution.commit_hash,
-        "profile": args.profile,
-        "concurrency": args.concurrency,
-        "file_count": len(files),
-        "expected_bytes": expected_bytes,
-        "progress_bytes": metrics.progress_bytes,
-        "first_progress_seconds": (
-            metrics.first_progress_at - metrics.started_at
-            if metrics.first_progress_at is not None
-            else None
-        ),
-        "elapsed_seconds": elapsed,
-        "average_expected_bps": expected_bytes / elapsed,
-        "peak_progress_bps": metrics.peak_bps,
-        "destination": str(args.destination.resolve()),
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        with ResourceSampler() as resources, xet_profile(args.profile):
+            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                list(pool.map(download, files))
+        elapsed = max(time.perf_counter() - metrics.started_at, 0.001)
+        reconciliation = reconcile_files(args.destination, [(item.path, item.size) for item in files])
+        result.update(
+            {
+                "repo_id": resolution.repo_id,
+                "commit_hash": resolution.commit_hash,
+                "file_count": len(files),
+                "expected_bytes": workload["expected_bytes"],
+                "progress_bytes": metrics.progress_bytes,
+                "metadata_resolve_seconds": resolve_seconds,
+                "ttfb_seconds": metrics.first_progress_at - metrics.started_at if metrics.first_progress_at else None,
+                "elapsed_seconds": elapsed,
+                "average_expected_bps": workload["expected_bytes"] / elapsed,
+                "peak_progress_bps": metrics.peak_bps,
+                "retry_count": None,
+                "fallback": None,
+                "reconciliation": reconciliation,
+                "resources": resource_result(resources),
+                "terminal_result": "completed" if reconciliation["status"] == "available" else "failed",
+            }
+        )
+    except BaseException as exc:
+        result.update({"terminal_result": "failed", "error_kind": type(exc).__name__, "error": str(exc)})
+        publish_result(result, args.output)
+        return 1
+    publish_result(result, args.output)
     return 0
 
 

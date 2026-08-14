@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "workloads": {
+    "hf-model-large": {
+      "provider": "huggingface",
+      "repo_type": "model",
+      "source": "https://huggingface.co/openai/whisper-large-v3-turbo/tree/41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+      "repo_id": "openai/whisper-large-v3-turbo",
+      "commit_hash": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+      "selector": {"paths": ["model.safetensors"]},
+      "file_count": 1,
+      "expected_bytes": 1617824864
+    },
+    "hf-dataset-small": {
+      "provider": "huggingface",
+      "repo_type": "dataset",
+      "source": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "repo_id": "google/fleurs",
+      "commit_hash": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "selector": {"regex": "^data/[^/]+/(dev|test|train)\\.tsv$"},
+      "file_count": 306,
+      "expected_bytes": 285358149
+    },
+    "hf-dataset-mixed": {
+      "provider": "huggingface",
+      "repo_type": "dataset",
+      "source": "https://huggingface.co/datasets/google/fleurs/tree/70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "repo_id": "google/fleurs",
+      "commit_hash": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "selector": {"prefixes": ["data/is_is/", "data/om_et/"]},
+      "file_count": 12,
+      "expected_bytes": 1848207780
+    },
+    "civitai-large": {
+      "provider": "civitai",
+      "repo_type": "model",
+      "source": "model:4384",
+      "repo_id": "models/4384",
+      "version_id": 128713,
+      "file_id": "93211",
+      "filename": "dreamshaper_8.safetensors",
+      "expected_bytes": 2132625894,
+      "sha256": "879DB523C30D3B9017143D56705015E15A2CB5628762C11D086FED9538ABD7FD"
+    }
+  }
+}
