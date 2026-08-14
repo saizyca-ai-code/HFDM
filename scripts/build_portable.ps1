@@ -8,8 +8,12 @@ $SourcePython = Join-Path $SourcePythonRoot "python.exe"
 $RequirementsLock = Join-Path $ProjectRoot "requirements.lock"
 $BuildRoot = Join-Path $ProjectRoot "build"
 $Stage = Join-Path $BuildRoot ".HFDM-portable.next"
+$BuildTemp = Join-Path $BuildRoot ".HFDM-portable.tmp"
 $Output = Join-Path $BuildRoot "HFDM-portable"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$PreviousTemp = $env:TEMP
+$PreviousTmp = $env:TMP
+$PreviousPipCache = $env:PIP_CACHE_DIR
 
 function Assert-BuildDirectory {
     param([string]$Path, [string[]]$AllowedNames)
@@ -48,9 +52,15 @@ if (-not (Test-Path -LiteralPath $BuildRoot)) {
     New-Item -ItemType Directory -Path $BuildRoot -ErrorAction Stop | Out-Null
 }
 Remove-BuildDirectory -Path $Stage -AllowedNames @(".HFDM-portable.next")
+Remove-BuildDirectory -Path $BuildTemp -AllowedNames @(".HFDM-portable.tmp")
 New-Item -ItemType Directory -Path $Stage -ErrorAction Stop | Out-Null
+New-Item -ItemType Directory -Path $BuildTemp -ErrorAction Stop | Out-Null
 
 try {
+    $env:TEMP = $BuildTemp
+    $env:TMP = $BuildTemp
+    $env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"
+
     $RuntimeTarget = New-Item -ItemType Directory -Path (Join-Path $Stage "python_embed") -ErrorAction Stop
     $PackageTarget = New-Item -ItemType Directory -Path (Join-Path $Stage "packages") -ErrorAction Stop
     New-Item -ItemType Directory -Path (Join-Path $Stage "app\src") -Force -ErrorAction Stop | Out-Null
@@ -121,5 +131,9 @@ try {
     Write-Host "[OK] Portable archive: $Zip"
 }
 finally {
+    $env:TEMP = $PreviousTemp
+    $env:TMP = $PreviousTmp
+    $env:PIP_CACHE_DIR = $PreviousPipCache
     Remove-BuildDirectory -Path $Stage -AllowedNames @(".HFDM-portable.next")
+    Remove-BuildDirectory -Path $BuildTemp -AllowedNames @(".HFDM-portable.tmp")
 }
