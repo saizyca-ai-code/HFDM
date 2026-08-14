@@ -18,6 +18,7 @@ from hfdm.hf_service import HuggingFaceService
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_common import (
+    FileProgressSampler,
     ResourceSampler,
     add_common_arguments,
     load_workload,
@@ -161,23 +162,31 @@ def main() -> int:
         )
 
     try:
-        with ResourceSampler() as resources, xet_profile(args.profile):
+        xet_cache = Path(os.environ.get("HF_XET_CACHE") or Path(os.environ.get("HF_HOME", args.destination / ".hf-home")) / "xet")
+        with ResourceSampler() as resources, FileProgressSampler(
+            [args.destination, xet_cache], workload["expected_bytes"]
+        ) as file_progress, xet_profile(args.profile):
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                 list(pool.map(download, files))
         elapsed = max(time.perf_counter() - metrics.started_at, 0.001)
         reconciliation = reconcile_files(args.destination, [(item.path, item.size) for item in files])
+        first_progress = [
+            value for value in (metrics.first_progress_at, file_progress.first_progress_at) if value
+        ]
         result.update(
             {
                 "repo_id": resolution.repo_id,
                 "commit_hash": resolution.commit_hash,
                 "file_count": len(files),
                 "expected_bytes": workload["expected_bytes"],
-                "progress_bytes": metrics.progress_bytes,
+                "progress_bytes": max(metrics.progress_bytes, file_progress.progress_bytes),
                 "metadata_resolve_seconds": resolve_seconds,
-                "ttfb_seconds": metrics.first_progress_at - metrics.started_at if metrics.first_progress_at else None,
+                "ttfb_seconds": min(first_progress) - metrics.started_at if first_progress else None,
+                "ttfb_basis": "tqdm" if metrics.first_progress_at else "file_growth",
                 "elapsed_seconds": elapsed,
                 "average_expected_bps": workload["expected_bytes"] / elapsed,
-                "peak_progress_bps": metrics.peak_bps,
+                "peak_progress_bps": metrics.peak_bps or None,
+                "peak_file_growth_bps": file_progress.peak_bps,
                 "retry_count": None,
                 "fallback": None,
                 "reconciliation": reconciliation,

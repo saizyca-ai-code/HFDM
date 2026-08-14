@@ -82,5 +82,25 @@ def test_civitai_benchmark_observer_reports_range_fallback(tmp_path: Path) -> No
         opener=lambda *_, **__: Response(),
         benchmark_observer=observations.update,
     )
-    assert observations == {"range_supported": False, "fallback": False}
+    assert observations == {
+        "resumed_from_bytes": 0,
+        "range_supported": False,
+        "fallback": False,
+    }
     assert module.reconcile_files(tmp_path, [("model.bin", 3)])["status"] == "available"
+
+
+def test_file_progress_sampler_observes_dedicated_directory_growth(tmp_path: Path) -> None:
+    module = _load("benchmark_common")
+    sampler = module.FileProgressSampler([tmp_path], 10)
+    (tmp_path / "chunk").write_bytes(b"1234")
+    sampler._observe()
+    assert sampler.first_progress_at is not None
+    assert sampler.progress_bytes == 4
+    assert sampler.peak_bps > 0
+
+
+def test_windows_rss_sampler_returns_a_positive_value() -> None:
+    module = _load("benchmark_common")
+    value = module._current_rss()
+    assert value is None or value > 0

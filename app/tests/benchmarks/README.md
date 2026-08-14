@@ -44,6 +44,10 @@ Use a distinct empty destination per cold run. Keep every JSON result, including
 4. Civitai: 1/2/4/8 segments; three cold runs per cell.
 5. Keep HF warm-cache and Civitai interrupted-resume runs separate from cold throughput ranking.
 
-Results include identity, bytes, TTFB, elapsed/average/peak rates, CPU time, peak RSS on Windows, Range/fallback state for Civitai, and stat-based reconciliation duration. `retry_count` remains `null` where the provider does not expose a trustworthy count.
+For a controlled Civitai resume check, first run with `--interrupt-after-bytes <bytes> --expect-interruption`, then invoke the same destination without those flags and with `--cache-mode resume`. The interrupted JSON must remain alongside the successful resume JSON. Resume throughput uses `transferred_bytes_this_run`; the already-present offset is not counted as new network transfer.
+
+Results include identity, bytes, TTFB, elapsed/average rates, CPU time, peak RSS on Windows, Range/fallback state for Civitai, and stat-based reconciliation duration. Civitai peak rate uses a 0.5-second provider-progress window. Because hf_xet does not consistently call Python tqdm, its TTFB uses observed growth in the dedicated destination/Xet cache; file-growth peak is recorded separately and must not be interpreted as network throughput. `retry_count` remains `null` where the provider does not expose a trustworthy count.
 
 Choose the lowest-resource setting with 100% success whose median throughput is at least 90% of the workload's fastest median. `maximum` replaces `balanced` only if Model and Dataset mixed workloads both improve by at least 15% without failures or abnormal resource use. HDD results apply only to rotating disks.
+
+The first confirmed live result summary is in `results/T020-20260814-hdd-1gbps.md`.

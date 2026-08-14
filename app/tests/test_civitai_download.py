@@ -86,6 +86,7 @@ def test_civitai_segment_files_are_reused_after_interruption(tmp_path: Path) -> 
         encoding="utf-8",
     )
     requested_ranges = []
+    observations = {}
     base_opener = range_opener(content)
 
     def opener(request, timeout=0):
@@ -103,10 +104,12 @@ def test_civitai_segment_files_are_reused_after_interruption(tmp_path: Path) -> 
         },
         lambda event: None,
         opener=opener,
+        benchmark_observer=observations.update,
     )
 
     assert (tmp_path / "model.bin").read_bytes() == content
     assert "bytes=3-4" in requested_ranges
+    assert observations["resumed_from_bytes"] == 3
     assert not part.exists()
 
 

@@ -84,6 +84,14 @@ def download_civitai_file(
     if stored_state != state:
         _clear_partial(part, meta)
     _write_state(meta, state)
+    if benchmark_observer:
+        resumed_bytes = part.stat().st_size if part.is_file() else 0
+        resumed_bytes += sum(
+            path.stat().st_size
+            for path in part.parent.glob(f"{part.name}.*")
+            if path.is_file() and path != meta
+        )
+        benchmark_observer({"resumed_from_bytes": resumed_bytes})
 
     range_supported, discovered_size, validator = _probe(download_url, token, opener)
     if benchmark_observer:

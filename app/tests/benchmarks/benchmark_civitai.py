@@ -22,10 +22,16 @@ from benchmark_common import (
 )
 
 
+class IntentionalBenchmarkInterruption(RuntimeError):
+    pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="HFDM Civitai segmented-transfer benchmark")
     parser.add_argument("--workload", choices=("civitai-large",), default="civitai-large")
     parser.add_argument("--segments", type=int, choices=(1, 2, 4, 8), required=True)
+    parser.add_argument("--interrupt-after-bytes", type=int, default=0)
+    parser.add_argument("--expect-interruption", action="store_true")
     add_common_arguments(parser)
     args = parser.parse_args()
     workload = load_workload(args.workload, "civitai")
@@ -72,21 +78,34 @@ def main() -> int:
     progress_started = time.perf_counter()
     first_progress_at: float | None = None
     previous_bytes = 0
-    previous_at = progress_started
+    previous_transferred_bytes = 0
+    rate_window_bytes = 0
+    rate_window_at = progress_started
     peak_bps = 0.0
     instrumentation: dict[str, Any] = {}
 
     def emit(event: dict[str, Any]) -> None:
-        nonlocal first_progress_at, previous_at, previous_bytes, peak_bps
+        nonlocal first_progress_at, rate_window_at, rate_window_bytes
+        nonlocal previous_bytes, previous_transferred_bytes, peak_bps
         if event.get("type") != "progress":
             return
         downloaded = int(event.get("downloaded") or 0)
+        resumed_from = int(instrumentation.get("resumed_from_bytes") or 0)
+        transferred = max(0, downloaded - resumed_from)
         now = time.perf_counter()
-        if downloaded > previous_bytes:
+        if transferred > previous_transferred_bytes:
             first_progress_at = first_progress_at or now
-            peak_bps = max(peak_bps, (downloaded - previous_bytes) / max(now - previous_at, 0.001))
+        window_elapsed = now - rate_window_at
+        if window_elapsed >= 0.5:
+            peak_bps = max(peak_bps, (transferred - rate_window_bytes) / window_elapsed)
+            rate_window_bytes = transferred
+            rate_window_at = now
         previous_bytes = max(previous_bytes, downloaded)
-        previous_at = now
+        previous_transferred_bytes = max(previous_transferred_bytes, transferred)
+        if args.interrupt_after_bytes and downloaded >= args.interrupt_after_bytes:
+            raise IntentionalBenchmarkInterruption(
+                f"intentional interruption after {downloaded} bytes"
+            )
 
     try:
         with ResourceSampler() as resources:
@@ -105,6 +124,8 @@ def main() -> int:
             )
         elapsed = max(time.perf_counter() - progress_started, 0.001)
         reconciliation = reconcile_files(args.destination, [(file.path, file.size)])
+        resumed_from = int(instrumentation.get("resumed_from_bytes") or 0)
+        transferred_bytes = max(0, file.size - resumed_from)
         result.update(
             {
                 "repo_id": resolution.repo_id,
@@ -115,12 +136,17 @@ def main() -> int:
                 "progress_bytes": previous_bytes,
                 "metadata_resolve_seconds": resolve_seconds,
                 "ttfb_seconds": first_progress_at - progress_started if first_progress_at else None,
+                "ttfb_basis": "provider_progress",
                 "elapsed_seconds": elapsed,
-                "average_expected_bps": file.size / elapsed,
+                "average_expected_bps": file.size / elapsed if resumed_from == 0 else None,
+                "average_transferred_bps": transferred_bytes / elapsed,
+                "transferred_bytes_this_run": transferred_bytes,
                 "peak_progress_bps": peak_bps,
+                "peak_progress_window_seconds": 0.5,
                 "retry_count": None,
                 "range_supported": instrumentation.get("range_supported"),
                 "fallback": instrumentation.get("fallback", False),
+                "resumed_from_bytes": instrumentation.get("resumed_from_bytes", 0),
                 "reconciliation": reconciliation,
                 "resources": resource_result(resources),
                 "sha256_verified": reconciliation["status"] == "available",
@@ -128,9 +154,22 @@ def main() -> int:
             }
         )
     except BaseException as exc:
-        result.update({"terminal_result": "failed", "error_kind": type(exc).__name__, "error": str(exc)})
+        intentional = isinstance(exc, IntentionalBenchmarkInterruption)
+        result.update(
+            {
+                "terminal_result": "interrupted" if intentional else "failed",
+                "error_kind": type(exc).__name__,
+                "error": str(exc),
+                "progress_bytes": previous_bytes,
+                "metadata_resolve_seconds": resolve_seconds,
+                "range_supported": instrumentation.get("range_supported"),
+                "fallback": instrumentation.get("fallback", False),
+                "resumed_from_bytes": instrumentation.get("resumed_from_bytes", 0),
+                "resources": resource_result(resources) if "resources" in locals() else None,
+            }
+        )
         publish_result(result, args.output)
-        return 1
+        return 0 if intentional and args.expect_interruption else 1
     publish_result(result, args.output)
     return 0
 
