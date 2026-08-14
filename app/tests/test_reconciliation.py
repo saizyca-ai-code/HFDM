@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sqlite3
 import time
@@ -14,6 +15,7 @@ from hfdm.download_manager import DownloadManagerError
 from hfdm.events import EventBroker
 from hfdm.main import create_app
 from hfdm.reconciliation import DownloadReconciler
+from hfdm.schemas import RepoFileInfo, RepoResolution
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "v1"
@@ -59,6 +61,52 @@ def test_changed_file_is_not_served_as_an_available_download(tmp_path: Path) -> 
     with TestClient(create_app(paths)) as client:
         response = client.get("/api/files/v1-changed/model.bin")
     assert response.status_code == 404
+
+
+def test_same_size_sha256_mismatch_is_reconciled_as_changed(tmp_path: Path) -> None:
+    paths = AppPaths(
+        root=tmp_path,
+        data=tmp_path / "data",
+        downloads=tmp_path / "download",
+        database=tmp_path / "data" / "hfdm.sqlite3",
+        frontend_dist=tmp_path / "dist",
+    )
+    paths.ensure()
+    db = Database(paths.database)
+    db.initialize()
+    manager = DownloadManager(paths, db, EventBroker())
+    expected = b"good"
+    actual = b"evil"
+    resolution = RepoResolution(
+        provider="civitai",
+        repo_id="models/123",
+        requested_revision="latest",
+        commit_hash="456",
+        files=[
+            RepoFileInfo(
+                path="model.bin",
+                size=len(expected),
+                remote_id="789",
+                sha256=hashlib.sha256(expected).hexdigest(),
+            )
+        ],
+        total_bytes=len(expected),
+    )
+    task = manager.create_task(resolution, ["model.bin"], None)
+    target = manager.task_destination(task) / "model.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(actual)
+    db.update_file(task["files"][0]["id"], status="completed", downloaded_bytes=len(actual))
+    db.update_task(task["id"], status="completed", downloaded_bytes=len(actual))
+
+    assert manager.reconcile(task["id"]) == 1
+
+    reconciled = db.get_task(task["id"])
+    assert reconciled is not None
+    assert reconciled["status"] == "completed"
+    assert reconciled["local_availability"] == "changed"
+    assert reconciled["files"][0]["local_status"] == "changed"
+    assert reconciled["files"][0]["observed_sha256"] == hashlib.sha256(actual).hexdigest()
 
 
 def test_startup_and_manual_reconciliation_are_available_through_api(tmp_path: Path) -> None:

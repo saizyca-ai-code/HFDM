@@ -17,7 +17,7 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
 - Restricts task control, deletion, and settings changes to loopback administrators.
 - Supports global capacity, free-space reserve, retention, and physical-delete policy settings.
 
-## V2 capabilities under development
+## V2 capabilities
 
 - Accepts Hugging Face Model and Dataset URLs, including `/tree/<revision>` references.
 - Keeps Model and Dataset identity separate and stores them under `download/models/` and `download/datasets/`.
@@ -42,6 +42,13 @@ HFDM is a LAN-first Hugging Face Model and Dataset download manager. It provides
 - Groups Civitai transfer and library entries by model, with versions and file
   variants nested under the model. Non-sensitive page and filter options are
   remembered by the browser; tokens are never persisted there.
+- Uses benchmarked transfer defaults: Hugging Face `balanced`, eight concurrent
+  files, and one Civitai segment. The service settings expose `balanced`,
+  `maximum`, and sequential-write `hdd` Hugging Face profiles.
+- Shows aggregate progress, current and peak speed, active and queued counts, and
+  a recent-speed graph above the transfer list. Tasks are newest-first and use
+  distinct Model, Dataset, and Civitai card colors; compact rows keep their
+  progress visible when file details are collapsed.
 
 ## Requirements
 
@@ -122,6 +129,26 @@ folder and ZIP. For a non-starting check of the development folder:
 ```text
 start_service.bat --check
 ```
+
+### Deploy or upgrade the portable release
+
+The target Windows computer does not need Python or Bun. For a fresh deployment,
+extract the ZIP into a new writable folder and run `start_service.bat`; do not run
+the service from inside the ZIP.
+
+To move or upgrade an existing installation without losing history:
+
+1. Stop HFDM completely.
+2. Back up the existing `data/` and `download/` directories together.
+3. Extract the new ZIP into a new empty folder. Do not copy the old `app/`,
+   `python_embed/`, or `packages/` directories over the new release.
+4. Copy the backed-up `data/` and `download/` into the new folder, then run
+   `start_service.bat`.
+5. Confirm the history and local-availability states before removing the backup.
+
+On the first V2 startup, a V1 database is backed up and migrated as described in
+[V1 database migration and rollback](#v1-database-migration-and-rollback). Never
+replace runtime files or restore a database while HFDM is running.
 
 For frontend development, place `bun.exe` in `tools`, or use Bun from `PATH`.
 
