@@ -60,7 +60,21 @@ function sourceCategory(provider: string, repoType: string): SourceCategory {
 
 function SourceBadge({ provider, repoType }: { provider: string; repoType: string }) {
   const category = sourceCategory(provider, repoType)
-  return <Badge className={category === "civitai-model" ? "border-cyan-400/20 bg-cyan-400/10 text-cyan-300" : category === "hf-dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : "border-sky-400/20 bg-sky-400/10 text-sky-300"}>{categoryLabels[category]}</Badge>
+  return <Badge className={category === "civitai-model" ? "border-amber-400/25 bg-amber-400/10 text-amber-300" : category === "hf-dataset" ? "border-violet-400/20 bg-violet-400/10 text-violet-300" : "border-sky-400/20 bg-sky-400/10 text-sky-300"}>{categoryLabels[category]}</Badge>
+}
+
+function sourceCardClass(provider: string, repoType: string): string {
+  const category = sourceCategory(provider, repoType)
+  if (category === "civitai-model") return "border-amber-400/20 bg-gradient-to-r from-amber-400/[.055] via-[#101821] to-[#101821]"
+  if (category === "hf-dataset") return "border-violet-400/20 bg-gradient-to-r from-violet-400/[.055] via-[#101821] to-[#101821]"
+  return "border-sky-400/20 bg-gradient-to-r from-sky-400/[.055] via-[#101821] to-[#101821]"
+}
+
+function newestTaskFirst(left: DownloadTask, right: DownloadTask): number {
+  const leftTime = Date.parse(left.created_at)
+  const rightTime = Date.parse(right.created_at)
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return rightTime - leftTime
+  return right.id.localeCompare(left.id)
 }
 
 function CategoryTabs({ value, onChange, counts, includeAll = false }: { value: SourceCategory | "all"; onChange: (value: SourceCategory | "all") => void; counts: Record<SourceCategory, number>; includeAll?: boolean }) {
@@ -438,6 +452,10 @@ function OverviewMetric({ label, value }: { label: string; value: string }) {
   return <div className="min-w-0"><div className="text-[10px] font-bold uppercase tracking-[.15em] text-slate-600">{label}</div><div className="mt-1 truncate text-sm font-semibold tabular-nums text-slate-200" title={value}>{value}</div></div>
 }
 
+type TransferEntry =
+  | { kind: "task"; task: DownloadTask }
+  | { kind: "civitai"; tasks: DownloadTask[] }
+
 function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
   const [category, setCategory] = useStoredState<SourceCategory | "all">("hfdm.transfers.category", "all")
   const active = tasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status))
@@ -446,13 +464,25 @@ function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin
     "hf-dataset": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-dataset").length,
     "civitai-model": new Set(tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "civitai-model").map((task) => task.repo_id)).size,
   }), [tasks])
-  const visible = category === "all" ? tasks : tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === category)
-  const regularTasks = visible.filter((task) => task.provider !== "civitai")
-  const civitaiGroups = [...new Map(visible.filter((task) => task.provider === "civitai").map((task) => [task.repo_id, visible.filter((candidate) => candidate.provider === "civitai" && candidate.repo_id === task.repo_id)])).values()]
+  const visible = useMemo(() => (category === "all" ? [...tasks] : tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === category)).sort(newestTaskFirst), [category, tasks])
+  const transferEntries = useMemo(() => {
+    const groupedCivitai = new Set<string>()
+    const entries: TransferEntry[] = []
+    for (const task of visible) {
+      if (task.provider !== "civitai") {
+        entries.push({ kind: "task", task })
+        continue
+      }
+      if (groupedCivitai.has(task.repo_id)) continue
+      groupedCivitai.add(task.repo_id)
+      entries.push({ kind: "civitai", tasks: visible.filter((candidate) => candidate.provider === "civitai" && candidate.repo_id === task.repo_id) })
+    }
+    return entries
+  }, [visible])
   return <><PageHeading eyebrow="Transfers" title="下載任務" description="即時查看服務端取得進度。暫停會停止排程並終止正在執行的檔案 worker。" action={<div className="flex items-center gap-2 text-xs text-slate-500"><CircleGauge className="size-4 text-cyan-400" />{active.length} active</div>} />
     <TransferOverview tasks={tasks} />
     <CategoryTabs value={category} onChange={setCategory} counts={counts} includeAll />
-    <div className="space-y-4">{visible.length ? <>{regularTasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />)}{civitaiGroups.map((group) => <CivitaiTaskGroup key={group[0].repo_id} tasks={group} isAdmin={isAdmin} refresh={refresh} />)}</> : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
+    <div className="space-y-4">{transferEntries.length ? transferEntries.map((entry) => entry.kind === "task" ? <TaskCard key={entry.task.id} task={entry.task} isAdmin={isAdmin} refresh={refresh} /> : <CivitaiTaskGroup key={entry.tasks[0].repo_id} tasks={entry.tasks} isAdmin={isAdmin} refresh={refresh} />) : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
   </>
 }
 
@@ -462,9 +492,9 @@ function CivitaiTaskGroup({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; 
   const activeVersions = versions.filter((task) => !["completed", "cancelled"].includes(task.status)).length
   const completedVersions = versions.filter((task) => task.status === "completed").length
   const totalFiles = new Set(tasks.flatMap((task) => task.files.map((file) => file.remote_id || file.path))).size
-  return <Card className="overflow-hidden border-cyan-400/15 bg-cyan-400/[.015]">
-    <div className="flex flex-col gap-3 border-b border-cyan-400/10 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0"><div className="flex items-center gap-2"><Box className="size-5 shrink-0 text-cyan-400" /><h3 className="truncate font-semibold text-white">{tasks[0].display_name || tasks[0].repo_id}</h3></div><div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 pl-7 text-xs text-slate-500"><span>Civitai · Model {tasks[0].repo_id}</span><span aria-hidden="true">·</span><span>{versions.length} 個版本</span><span aria-hidden="true">·</span><span>{totalFiles} 個檔案</span>{duplicateCount > 0 && <><span aria-hidden="true">·</span><span>{duplicateCount} 筆舊紀錄已折疊</span></>}</div></div>
+  return <Card className={cn("overflow-hidden", sourceCardClass("civitai", "model"))}>
+    <div className="flex flex-col gap-3 border-b border-amber-400/10 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0"><div className="flex items-center gap-2"><Box className="size-5 shrink-0 text-amber-400" /><h3 className="truncate font-semibold text-white">{tasks[0].display_name || tasks[0].repo_id}</h3></div><div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 pl-7 text-xs text-slate-500"><span>Civitai · Model {tasks[0].repo_id}</span><span aria-hidden="true">·</span><span>{versions.length} 個版本</span><span aria-hidden="true">·</span><span>{totalFiles} 個檔案</span>{duplicateCount > 0 && <><span aria-hidden="true">·</span><span>{duplicateCount} 筆舊紀錄已折疊</span></>}</div></div>
       <div className="flex shrink-0 items-center gap-2 text-xs"><span className={cn("size-2 rounded-full", activeVersions ? "bg-cyan-400 pulse-soft" : completedVersions === versions.length ? "bg-emerald-400" : "bg-slate-500")} /><span className="text-slate-400">{activeVersions ? `${activeVersions} 個版本進行中` : completedVersions === versions.length ? "所有版本已完成" : `${completedVersions} / ${versions.length} 已完成`}</span></div>
     </div>
     <div className="divide-y divide-white/[.055]">{versions.map((task) => <TaskCard key={task.commit_hash} task={task} isAdmin={isAdmin} refresh={refresh} compact />)}</div>
@@ -532,10 +562,11 @@ function TaskCard({ task, isAdmin, refresh, compact = false }: { task: DownloadT
     finally { setBusy(false) }
   }
   const Container = compact ? "div" : Card
-  return <Container className={cn("overflow-hidden", compact && "bg-[#0d141c]/55")}>
+  const cardCategory = sourceCategory(task.provider, task.repo_type)
+  return <Container className={cn("overflow-hidden", compact ? "bg-[#0d141c]/55" : sourceCardClass(task.provider, task.repo_type))}>
     <div className={compact ? "px-3 py-3 sm:px-4" : "p-5"}>
       <div className={cn("flex flex-col gap-3", compact ? "sm:flex-row sm:items-center" : "md:flex-row md:items-center md:gap-4")}>
-        {!compact && <div className="grid size-11 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-[#0a1016]"><Box className="size-5 text-cyan-400/75" /></div>}
+        {!compact && <div className={cn("grid size-11 shrink-0 place-items-center rounded-xl border bg-[#0a1016]", cardCategory === "hf-dataset" ? "border-violet-400/15" : "border-sky-400/15")}><Box className={cn("size-5", cardCategory === "hf-dataset" ? "text-violet-400/80" : "text-sky-400/80")} /></div>}
         <button type="button" onClick={() => compact && setExpanded(!expanded)} className={cn("min-w-0 flex-1 text-left", compact && "group")}>
           <div className="flex flex-wrap items-center gap-2">
             {compact && <ChevronDown className={cn("size-4 shrink-0 text-slate-600 transition-transform group-hover:text-cyan-300", expanded && "rotate-180")} />}
