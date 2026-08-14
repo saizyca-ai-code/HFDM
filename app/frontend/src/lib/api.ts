@@ -125,6 +125,7 @@ export type AppSettings = {
   retention_days: number
   allow_delete_files: boolean
   civitai_segments: number
+  hf_profile: "balanced" | "maximum" | "hdd"
 }
 
 function sourceToken(source: string, token: string): Record<string, string | null> {

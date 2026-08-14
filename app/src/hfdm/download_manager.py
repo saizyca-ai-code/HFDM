@@ -25,6 +25,19 @@ class DownloadManagerError(RuntimeError):
     pass
 
 
+def worker_environment(provider: str, hf_profile: str) -> dict[str, str]:
+    """Build an isolated worker environment for the selected transfer profile."""
+    environment = os.environ.copy()
+    environment.pop("HF_XET_HIGH_PERFORMANCE", None)
+    environment.pop("HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY", None)
+    if provider != "civitai":
+        if hf_profile == "maximum":
+            environment["HF_XET_HIGH_PERFORMANCE"] = "1"
+        elif hf_profile == "hdd":
+            environment["HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY"] = "1"
+    return environment
+
+
 @dataclass(slots=True)
 class ActiveWorker:
     task_id: str
@@ -469,6 +482,7 @@ class DownloadManager:
 
     def _spawn(self, task: dict[str, Any], file: dict[str, Any], key: str) -> ActiveWorker:
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        settings = self.db.get_settings()
         process = subprocess.Popen(
             [sys.executable, "-m", "hfdm.download_worker"],
             stdin=subprocess.PIPE,
@@ -477,6 +491,7 @@ class DownloadManager:
             text=True,
             encoding="utf-8",
             creationflags=creation_flags,
+            env=worker_environment(task["provider"], settings["hf_profile"]),
         )
         payload = {
             "provider": task["provider"],
@@ -494,7 +509,7 @@ class DownloadManager:
                     "expected_sha256": file.get("expected_sha256"),
                     "download_url": file.get("download_url"),
                     "provider_metadata": file.get("provider_metadata", {}),
-                    "segments": self.db.get_settings()["civitai_segments"],
+                    "segments": settings["civitai_segments"],
                 }
             )
         assert process.stdin is not None

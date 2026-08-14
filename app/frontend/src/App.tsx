@@ -31,7 +31,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { FileTree } from "@/components/file-tree"
 import { Badge } from "@/components/ui/badge"
@@ -385,9 +385,62 @@ function MetricCard({ icon: Icon, label, value, note }: { icon: typeof Archive; 
   return <Card><CardContent className="p-4"><div className="mb-4 flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-[.18em] text-slate-600">{label}</span><Icon className="size-4 text-cyan-400/60" /></div><div className="text-xl font-semibold text-slate-100">{value}</div><div className="mt-1 text-xs text-slate-600">{note}</div></CardContent></Card>
 }
 
+function TransferOverview({ tasks }: { tasks: DownloadTask[] }) {
+  const pending = tasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status))
+  const currentSpeed = tasks.filter((task) => ["downloading", "pausing"].includes(task.status)).reduce((sum, task) => sum + task.speed_bps, 0)
+  const downloadedBytes = pending.reduce((sum, task) => sum + task.downloaded_bytes, 0)
+  const totalBytes = pending.reduce((sum, task) => sum + task.total_bytes, 0)
+  const activeCount = pending.filter((task) => ["downloading", "pausing"].includes(task.status)).length
+  const queuedCount = pending.filter((task) => task.status === "queued").length
+  const [peakSpeed, setPeakSpeed] = useState(0)
+  const [samples, setSamples] = useState<number[]>(() => Array(30).fill(0))
+  const speedRef = useRef(0)
+  speedRef.current = currentSpeed
+  useEffect(() => {
+    setPeakSpeed((peak) => Math.max(peak, currentSpeed))
+  }, [currentSpeed])
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const speed = speedRef.current
+      setSamples((current) => [...current.slice(-59), speed])
+      setPeakSpeed((peak) => Math.max(peak, speed))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const chartPoints = useMemo(() => {
+    const ceiling = Math.max(...samples, 1)
+    return samples.map((sample, index) => `${(index / Math.max(samples.length - 1, 1)) * 100},${34 - (sample / ceiling) * 31}`).join(" ")
+  }, [samples])
+  const overallProgress = percent(downloadedBytes, totalBytes)
+
+  return <Card className="mb-5 overflow-hidden border-cyan-400/15 bg-gradient-to-br from-cyan-400/[.065] via-[#111a24] to-[#0d141d]">
+    <CardContent className="p-0">
+      <div className="grid gap-5 p-5 lg:grid-cols-[minmax(260px,1.2fr)_minmax(420px,1.8fr)]">
+        <div className="flex min-w-0 flex-col justify-between">
+          <div><div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[.2em] text-cyan-300/75"><Download className="size-4" />整體下載進度</div><div className="mt-2 flex items-end gap-3"><span className="text-3xl font-semibold tabular-nums text-white">{overallProgress}%</span><span className="pb-1 text-xs text-slate-500">{pending.length ? `${pending.length} 個未結束任務` : "目前沒有待處理任務"}</span></div></div>
+          <div className="mt-5"><Progress value={overallProgress} className="h-2" /><div className="mt-2 flex justify-between gap-3 text-xs tabular-nums text-slate-500"><span>{formatBytes(downloadedBytes)} 已下載</span><span>{formatBytes(totalBytes)} 總量</span></div></div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-[minmax(200px,1fr)_minmax(220px,1.4fr)]">
+          <div className="grid grid-cols-2 gap-x-5 gap-y-4">
+            <OverviewMetric label="目前速度" value={`${formatBytes(currentSpeed)}/s`} />
+            <OverviewMetric label="本次峰值" value={`${formatBytes(peakSpeed)}/s`} />
+            <OverviewMetric label="佇列總量" value={formatBytes(totalBytes)} />
+            <OverviewMetric label="執行中 / 等待" value={`${activeCount} / ${queuedCount}`} />
+          </div>
+          <div className="min-h-28 rounded-xl border border-white/[.06] bg-black/15 p-3"><div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[.16em] text-slate-600"><span>速度歷史</span><span>最近 60 秒</span></div><svg viewBox="0 0 100 36" preserveAspectRatio="none" className="h-20 w-full" role="img" aria-label="最近六十秒的整體下載速度"><defs><linearGradient id="transfer-speed-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#22d3ee" stopOpacity="0.28" /><stop offset="100%" stopColor="#22d3ee" stopOpacity="0" /></linearGradient></defs><polygon points={`0,36 ${chartPoints} 100,36`} fill="url(#transfer-speed-fill)" /><polyline points={chartPoints} fill="none" stroke="#22d3ee" strokeWidth="1.2" vectorEffect="non-scaling-stroke" /></svg></div>
+        </div>
+      </div>
+    </CardContent>
+  </Card>
+}
+
+function OverviewMetric({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0"><div className="text-[10px] font-bold uppercase tracking-[.15em] text-slate-600">{label}</div><div className="mt-1 truncate text-sm font-semibold tabular-nums text-slate-200" title={value}>{value}</div></div>
+}
+
 function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin: boolean; refresh: () => Promise<void> }) {
   const [category, setCategory] = useStoredState<SourceCategory | "all">("hfdm.transfers.category", "all")
-  const active = tasks.filter((task) => task.status !== "completed" && task.status !== "cancelled")
+  const active = tasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status))
   const counts = useMemo(() => ({
     "hf-model": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-model").length,
     "hf-dataset": tasks.filter((task) => sourceCategory(task.provider, task.repo_type) === "hf-dataset").length,
@@ -397,6 +450,7 @@ function Transfers({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; isAdmin
   const regularTasks = visible.filter((task) => task.provider !== "civitai")
   const civitaiGroups = [...new Map(visible.filter((task) => task.provider === "civitai").map((task) => [task.repo_id, visible.filter((candidate) => candidate.provider === "civitai" && candidate.repo_id === task.repo_id)])).values()]
   return <><PageHeading eyebrow="Transfers" title="下載任務" description="即時查看服務端取得進度。暫停會停止排程並終止正在執行的檔案 worker。" action={<div className="flex items-center gap-2 text-xs text-slate-500"><CircleGauge className="size-4 text-cyan-400" />{active.length} active</div>} />
+    <TransferOverview tasks={tasks} />
     <CategoryTabs value={category} onChange={setCategory} counts={counts} includeAll />
     <div className="space-y-4">{visible.length ? <>{regularTasks.map((task) => <TaskCard key={task.id} task={task} isAdmin={isAdmin} refresh={refresh} />)}{civitaiGroups.map((group) => <CivitaiTaskGroup key={group[0].repo_id} tasks={group} isAdmin={isAdmin} refresh={refresh} />)}</> : <EmptyState icon={Activity} title="此分類尚無下載任務" text="請從左側選擇 Hugging Face 或 Civitai 下載入口建立任務。" />}</div>
   </>
@@ -747,6 +801,7 @@ function SettingsPage({ isAdmin }: { isAdmin: boolean }) {
   return <><PageHeading eyebrow="Server controls" title="服務設定" description="容量與保留政策只影響後續任務。管理寫入僅允許從伺服器本機連線。" />
     {!isAdmin && <Card className="mb-5 border-amber-400/15 bg-amber-400/[.04]"><CardContent className="flex items-center gap-3 p-4 text-sm text-amber-200"><ShieldCheck className="size-5" />目前是訪客連線；設定為唯讀。</CardContent></Card>}
     {settings && <Card className="max-w-2xl"><CardHeader><h2 className="font-semibold text-white">下載與儲存</h2></CardHeader><CardContent className="space-y-5">
+      <SettingField label="Hugging Face 效能模式" note="Balanced 為 benchmark 建議預設；Maximum 提高資源占用，HDD 偏好順序寫入"><select value={settings.hf_profile} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, hf_profile: e.target.value as AppSettings["hf_profile"] })} className="h-9 rounded-md border border-white/10 bg-[#0c131b] px-3 text-sm text-slate-300 outline-none focus:border-cyan-400/40 disabled:opacity-50"><option value="balanced">Balanced（建議）</option><option value="maximum">Maximum</option><option value="hdd">HDD 順序寫入</option></select></SettingField>
       <SettingField label="同時下載檔案數" note="全服務共用的 worker 上限"><Input type="number" min={1} max={16} value={settings.max_concurrent_files} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, max_concurrent_files: Number(e.target.value) })} /></SettingField>
       <SettingField label="Civitai 分段數" note="支援 Range 時每個檔案使用 1–8 段；不支援時自動退回單串流"><Input type="number" min={1} max={8} value={settings.civitai_segments} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, civitai_segments: Number(e.target.value) })} /></SettingField>
       <SettingField label="容量上限（GiB）" note="0 代表不限容量"><Input type="number" min={0} value={Math.round(settings.max_storage_bytes / 1024 ** 3)} disabled={!isAdmin} onChange={(e) => setSettings({ ...settings, max_storage_bytes: Number(e.target.value) * 1024 ** 3 })} /></SettingField>

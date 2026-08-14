@@ -185,12 +185,13 @@ class LibraryItemView(BaseModel):
 
 
 class AppSettingsView(BaseModel):
-    max_concurrent_files: int = Field(ge=1, le=16)
+    max_concurrent_files: int = Field(default=8, ge=1, le=16)
     max_storage_bytes: int = Field(ge=0)
     min_free_bytes: int = Field(ge=0)
     retention_days: int = Field(ge=0)
     allow_delete_files: bool = True
-    civitai_segments: int = Field(default=4, ge=1, le=8)
+    civitai_segments: int = Field(default=1, ge=1, le=8)
+    hf_profile: Literal["balanced", "maximum", "hdd"] = "balanced"
 
 
 class IdentityView(BaseModel):

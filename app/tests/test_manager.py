@@ -6,7 +6,12 @@ import pytest
 import hfdm.download_manager as download_manager_module
 from hfdm.config import AppPaths
 from hfdm.database import Database
-from hfdm.download_manager import ActiveWorker, DownloadManager, DownloadManagerError
+from hfdm.download_manager import (
+    ActiveWorker,
+    DownloadManager,
+    DownloadManagerError,
+    worker_environment,
+)
 from hfdm.events import EventBroker
 from hfdm.schemas import RepoFileInfo, RepoResolution
 
@@ -23,6 +28,25 @@ def make_manager(tmp_path: Path) -> DownloadManager:
     db = Database(paths.database)
     db.initialize()
     return DownloadManager(paths, db, EventBroker())
+
+
+def test_worker_environment_maps_hf_profiles_without_leaking_to_civitai(monkeypatch) -> None:
+    monkeypatch.setenv("HF_XET_HIGH_PERFORMANCE", "inherited")
+    monkeypatch.setenv("HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY", "inherited")
+
+    balanced = worker_environment("huggingface", "balanced")
+    maximum = worker_environment("huggingface", "maximum")
+    hdd = worker_environment("huggingface", "hdd")
+    civitai = worker_environment("civitai", "maximum")
+
+    assert "HF_XET_HIGH_PERFORMANCE" not in balanced
+    assert "HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY" not in balanced
+    assert maximum["HF_XET_HIGH_PERFORMANCE"] == "1"
+    assert "HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY" not in maximum
+    assert hdd["HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY"] == "1"
+    assert "HF_XET_HIGH_PERFORMANCE" not in hdd
+    assert "HF_XET_HIGH_PERFORMANCE" not in civitai
+    assert "HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY" not in civitai
 
 
 def test_task_can_pause_and_resume_without_starting_worker(tmp_path: Path) -> None:

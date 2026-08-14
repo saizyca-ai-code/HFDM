@@ -713,15 +713,16 @@ class Database:
                 ).fetchall()
             }
 
-    def get_settings(self) -> dict[str, int]:
+    def get_settings(self) -> dict[str, Any]:
         with self.connect() as conn:
             values = {
-                row["key"]: int(json.loads(row["value"]))
+                row["key"]: json.loads(row["value"])
                 for row in conn.execute("SELECT key, value FROM settings").fetchall()
+                if row["key"] in DEFAULT_SETTINGS
             }
         return {**DEFAULT_SETTINGS, **values}
 
-    def set_settings(self, values: dict[str, int]) -> None:
+    def set_settings(self, values: dict[str, Any]) -> None:
         with self._write_lock, self.connect() as conn:
             for key, value in values.items():
                 conn.execute(

@@ -4,6 +4,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 def _default_root() -> Path:
@@ -66,11 +67,12 @@ class AppPaths:
         self.downloads.mkdir(parents=True, exist_ok=True)
 
 
-DEFAULT_SETTINGS: dict[str, int] = {
-    "max_concurrent_files": 2,
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "max_concurrent_files": 8,
     "max_storage_bytes": 0,
     "min_free_bytes": 10 * 1024**3,
     "retention_days": 0,
     "allow_delete_files": 1,
-    "civitai_segments": 4,
+    "civitai_segments": 1,
+    "hf_profile": "balanced",
 }

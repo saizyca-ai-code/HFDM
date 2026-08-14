@@ -3,6 +3,19 @@ from pathlib import Path
 from hfdm.database import Database, utc_now
 
 
+def test_settings_use_benchmarked_defaults_and_persist_hf_profile(tmp_path: Path) -> None:
+    db = Database(tmp_path / "data.sqlite3")
+    db.initialize()
+
+    settings = db.get_settings()
+    assert settings["max_concurrent_files"] == 8
+    assert settings["civitai_segments"] == 1
+    assert settings["hf_profile"] == "balanced"
+
+    db.set_settings({**settings, "hf_profile": "hdd"})
+    assert db.get_settings()["hf_profile"] == "hdd"
+
+
 def test_database_creates_and_recovers_task(tmp_path: Path) -> None:
     db = Database(tmp_path / "data.sqlite3")
     db.initialize()

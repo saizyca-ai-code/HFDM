@@ -3,6 +3,7 @@ from __future__ import annotations
 import mimetypes
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -316,11 +317,11 @@ def create_router(
         return StreamingResponse(broker.stream(), media_type="text/event-stream")
 
     @router.get("/settings", response_model=AppSettingsView)
-    def get_settings() -> dict[str, int]:
+    def get_settings() -> dict[str, Any]:
         return db.get_settings()
 
     @router.put("/settings", response_model=AppSettingsView, dependencies=[Depends(require_admin)])
-    def update_settings(payload: AppSettingsView) -> dict[str, int]:
+    def update_settings(payload: AppSettingsView) -> dict[str, Any]:
         db.set_settings(payload.model_dump())
         return db.get_settings()
 

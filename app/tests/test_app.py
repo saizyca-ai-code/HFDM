@@ -27,6 +27,29 @@ def test_production_app_serves_api_and_frontend(tmp_path: Path) -> None:
     assert "<title>HFDM</title>" in index.text
 
 
+def test_admin_can_read_and_update_hf_profile(tmp_path: Path) -> None:
+    paths = AppPaths(
+        root=tmp_path,
+        data=tmp_path / "data",
+        downloads=tmp_path / "download",
+        database=tmp_path / "data" / "hfdm.sqlite3",
+        frontend_dist=tmp_path / "dist",
+    )
+    app = create_app(paths)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        current = client.get("/api/settings").json()
+        assert current["hf_profile"] == "balanced"
+        assert current["max_concurrent_files"] == 8
+        assert current["civitai_segments"] == 1
+
+        response = client.put("/api/settings", json={**current, "hf_profile": "maximum"})
+        invalid = client.put("/api/settings", json={**current, "hf_profile": "turbo"})
+
+    assert response.status_code == 200
+    assert response.json()["hf_profile"] == "maximum"
+    assert invalid.status_code == 422
+
+
 def test_existing_task_can_inspect_repo_and_update_selection(
     tmp_path: Path,
     monkeypatch,
