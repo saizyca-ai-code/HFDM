@@ -34,3 +34,20 @@ body::before {
 
 @keyframes pulse-soft { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 .pulse-soft { animation: pulse-soft 1.8s ease-in-out infinite; }
+@keyframes hfdm-dialog-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes hfdm-dialog-panel-in {
+  from { opacity: 0; transform: translateY(12px) scale(.975); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.hfdm-dialog-backdrop { animation: hfdm-dialog-backdrop-in 150ms ease-out; }
+.hfdm-dialog-panel { animation: hfdm-dialog-panel-in 180ms cubic-bezier(.2,.8,.2,1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .hfdm-dialog-backdrop,
+  .hfdm-dialog-panel { animation: none; }
+}

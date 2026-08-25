@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 from .config import DEFAULT_SETTINGS
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 TERMINAL_TRANSFER_STATUSES = {"completed", "failed", "cancelled"}
 
 
@@ -218,6 +218,8 @@ class Database:
             conn.execute(statement)
 
         self._migrate_to_v3(conn)
+        self._migrate_to_v4(conn)
+        self._migrate_to_v5(conn)
 
         task_rows = conn.execute("SELECT * FROM tasks").fetchall()
         for task in task_rows:
@@ -293,6 +295,81 @@ class Database:
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
+    @staticmethod
+    def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+        record_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(download_records)").fetchall()
+        }
+        if "archived_at" not in record_columns:
+            conn.execute("ALTER TABLE download_records ADD COLUMN archived_at TEXT")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS user_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS library_user_tags (
+                provider TEXT NOT NULL,
+                repo_type TEXT NOT NULL,
+                remote_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL REFERENCES user_tags(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(provider, repo_type, remote_id, tag_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_library_user_tags_source
+                ON library_user_tags(provider, repo_type, remote_id);
+            """
+        )
+
+    @staticmethod
+    def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+        record_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(download_records)").fetchall()
+        }
+        additions = {
+            "source_created_at": "TEXT",
+            "source_updated_at": "TEXT",
+            "timeline_date": "TEXT",
+            "timeline_date_edited_at": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in record_columns:
+                conn.execute(f"ALTER TABLE download_records ADD COLUMN {name} {declaration}")
+        for row in conn.execute(
+            "SELECT id, provider_metadata, source_created_at, source_updated_at, timeline_date "
+            "FROM download_records"
+        ).fetchall():
+            try:
+                metadata = json.loads(row["provider_metadata"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            source_created = row["source_created_at"] or metadata.get("source_created_at")
+            source_updated = row["source_updated_at"] or metadata.get("source_updated_at")
+            timeline_date = row["timeline_date"] or Database._date_part(source_created)
+            conn.execute(
+                "UPDATE download_records SET source_created_at=?, source_updated_at=?, timeline_date=? "
+                "WHERE id=?",
+                (source_created, source_updated, timeline_date, row["id"]),
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_download_attempts_completed "
+            "ON download_attempts(status, completed_at)"
+        )
+
+    @staticmethod
+    def _date_part(value: Any) -> str | None:
+        if not value:
+            return None
+        candidate = str(value)[:10]
+        try:
+            date.fromisoformat(candidate)
+        except ValueError:
+            return None
+        return candidate
+
     def recover_interrupted(self) -> None:
         now = utc_now()
         with self._write_lock, self.connect() as conn:
@@ -341,9 +418,16 @@ class Database:
             "repo_type": "model",
             "display_name": None,
             "provider_metadata": "{}",
+            "source_created_at": None,
+            "source_updated_at": None,
+            "timeline_date": None,
             **task,
             "provider_metadata": self._json_text(task.get("provider_metadata", {})),
         }
+        metadata = task.get("provider_metadata", {})
+        task_values["source_created_at"] = metadata.get("source_created_at")
+        task_values["source_updated_at"] = metadata.get("source_updated_at")
+        task_values["timeline_date"] = self._date_part(task_values["source_created_at"])
         with self._write_lock, self.connect() as conn:
             conn.execute(
                 """
@@ -375,11 +459,13 @@ class Database:
                     id, provider, repo_type, remote_id, requested_revision, resolved_revision,
                     destination, transfer_status, local_availability, total_bytes,
                     downloaded_bytes, requires_token, display_name, provider_metadata,
+                    source_created_at, source_updated_at, timeline_date,
                     error, created_at, updated_at
                 ) VALUES (
                     :id, :provider, :repo_type, :repo_id, :requested_revision, :commit_hash,
                     :destination, :status, 'unknown', :total_bytes, 0, :requires_token,
-                    :display_name, :provider_metadata, NULL, :created_at, :updated_at
+                    :display_name, :provider_metadata, :source_created_at, :source_updated_at,
+                    :timeline_date, NULL, :created_at, :updated_at
                 )
                 """,
                 task_values,
@@ -427,7 +513,7 @@ class Database:
                 groups.setdefault(key, []).append(record)
 
             items: list[dict[str, Any]] = []
-            local_priority = {"available": 4, "changed": 3, "unknown": 2, "moved": 1}
+            local_priority = {"available": 5, "changed": 4, "unknown": 3, "moved": 2, "archived": 1}
             for identity, group_records in groups.items():
                 files_by_path: dict[str, dict[str, Any]] = {}
                 for record in group_records:
@@ -467,7 +553,7 @@ class Database:
                 restore_record_ids = {
                     file["record_id"]
                     for file in files
-                    if file["local_status"] == "moved"
+                    if file["local_status"] in {"moved", "archived"}
                     and file["record_id"] in completed_record_ids
                 }
                 statuses = [file["local_status"] for file in files]
@@ -477,11 +563,34 @@ class Database:
                     availability = "unknown"
                 elif all(status == "available" for status in statuses):
                     availability = "available"
+                elif all(status == "archived" for status in statuses):
+                    availability = "archived"
                 elif all(status == "moved" for status in statuses):
                     availability = "moved"
                 else:
                     availability = "partial"
                 latest = group_records[0]
+                user_tags = [
+                    {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "usage_count": int(row["usage_count"]),
+                    }
+                    for row in conn.execute(
+                        """
+                        SELECT user_tags.id, user_tags.name,
+                               (SELECT COUNT(*) FROM library_user_tags usage
+                                WHERE usage.tag_id=user_tags.id) AS usage_count
+                        FROM library_user_tags
+                        JOIN user_tags ON user_tags.id=library_user_tags.tag_id
+                        WHERE library_user_tags.provider=?
+                          AND library_user_tags.repo_type=?
+                          AND library_user_tags.remote_id=?
+                        ORDER BY user_tags.name COLLATE NOCASE
+                        """,
+                        (latest["provider"], latest["repo_type"], latest["remote_id"]),
+                    ).fetchall()
+                ]
                 items.append(
                     {
                         "key": "|".join(identity),
@@ -498,7 +607,12 @@ class Database:
                         "total_bytes": sum(int(file["size"]) for file in files),
                         "requires_token": any(bool(record["requires_token"]) for record in group_records),
                         "display_name": latest["display_name"],
+                        "source_created_at": latest["source_created_at"],
+                        "source_updated_at": latest["source_updated_at"],
+                        "timeline_date": latest["timeline_date"],
+                        "timeline_date_edited_at": latest["timeline_date_edited_at"],
                         "provider_metadata": self._json_object(latest["provider_metadata"]),
+                        "user_tags": user_tags,
                         "restore_record_ids": sorted(restore_record_ids),
                         "files": files,
                         "updated_at": latest["updated_at"],
@@ -508,6 +622,271 @@ class Database:
             for item in items:
                 item.pop("updated_at", None)
             return items
+
+    def set_library_timeline_date(self, record_id: str, timeline_date: str | None) -> None:
+        records = self.library_identity_records(record_id)
+        record_ids = [record["id"] for record in records]
+        marks = ",".join("?" for _ in record_ids)
+        with self._write_lock, self.connect() as conn:
+            conn.execute(
+                f"UPDATE download_records SET timeline_date=?, timeline_date_edited_at=? "
+                f"WHERE id IN ({marks})",
+                (timeline_date, utc_now(), *record_ids),
+            )
+
+    def set_library_source_dates(
+        self,
+        record_id: str,
+        source_created_at: str,
+        source_updated_at: str | None,
+        *,
+        apply_source_date: bool = False,
+    ) -> dict[str, Any]:
+        timeline_date = self._date_part(source_created_at)
+        if timeline_date is None:
+            raise ValueError("來源 createdAt 格式不正確")
+        records = self.library_identity_records(record_id)
+        record_ids = [record["id"] for record in records]
+        marks = ",".join("?" for _ in record_ids)
+        manually_edited = any(record.get("timeline_date_edited_at") for record in records)
+        with self._write_lock, self.connect() as conn:
+            if apply_source_date:
+                conn.execute(
+                    f"UPDATE download_records SET source_created_at=?, source_updated_at=?, "
+                    f"timeline_date=?, timeline_date_edited_at=NULL WHERE id IN ({marks})",
+                    (source_created_at, source_updated_at, timeline_date, *record_ids),
+                )
+            else:
+                conn.execute(
+                    f"UPDATE download_records SET source_created_at=?, source_updated_at=?, "
+                    f"timeline_date=CASE WHEN timeline_date_edited_at IS NULL THEN ? ELSE timeline_date END "
+                    f"WHERE id IN ({marks})",
+                    (source_created_at, source_updated_at, timeline_date, *record_ids),
+                )
+            latest = conn.execute(
+                "SELECT timeline_date FROM download_records WHERE id=?",
+                (record_id,),
+            ).fetchone()
+        return {
+            "source_created_at": source_created_at,
+            "source_updated_at": source_updated_at,
+            "timeline_date": latest["timeline_date"] if latest else timeline_date,
+            "timeline_date_preserved": manually_edited and not apply_source_date,
+            "timeline_date_restored": manually_edited and apply_source_date,
+        }
+
+    def dashboard(self, days: int = 90) -> dict[str, Any]:
+        period_start = datetime.now(UTC) - timedelta(days=days) if days else None
+        params: tuple[str, ...] = (period_start.isoformat(),) if period_start else ()
+        where = "AND attempts.completed_at>=?" if period_start else ""
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT attempts.record_id, attempts.completed_at,
+                       attempts.downloaded_bytes, attempts.total_bytes,
+                       records.provider, records.repo_type, records.remote_id,
+                       records.resolved_revision, records.display_name, records.provider_metadata
+                FROM download_attempts attempts
+                JOIN download_records records ON records.id=attempts.record_id
+                WHERE attempts.status='completed' AND attempts.completed_at IS NOT NULL {where}
+                ORDER BY attempts.completed_at DESC
+                """,
+                params,
+            ).fetchall()
+        months: dict[str, dict[str, Any]] = {}
+        categories: dict[str, int] = {}
+        unique_models: set[tuple[str, str, str, str]] = set()
+        total_bytes = 0
+        recent: list[dict[str, Any]] = []
+        for row in rows:
+            month = str(row["completed_at"])[:7]
+            identity = (row["provider"], row["repo_type"], row["remote_id"], row["resolved_revision"])
+            category = (
+                "Civitai Model"
+                if row["provider"] == "civitai"
+                else "Hugging Face Dataset"
+                if row["repo_type"] == "dataset"
+                else "Hugging Face Model"
+            )
+            amount = int(row["downloaded_bytes"] or row["total_bytes"] or 0)
+            bucket = months.setdefault(
+                month,
+                {"month": month, "download_count": 0, "unique": set(), "total_bytes": 0, "categories": {}},
+            )
+            bucket["download_count"] += 1
+            bucket["unique"].add(identity)
+            bucket["total_bytes"] += amount
+            bucket["categories"][category] = bucket["categories"].get(category, 0) + 1
+            categories[category] = categories.get(category, 0) + 1
+            unique_models.add(identity)
+            total_bytes += amount
+            if len(recent) < 12:
+                recent.append(
+                    {
+                        "record_id": row["record_id"],
+                        "provider": row["provider"],
+                        "repo_type": row["repo_type"],
+                        "repo_id": row["remote_id"],
+                        "display_name": row["display_name"],
+                        "completed_at": row["completed_at"],
+                        "total_bytes": amount,
+                    }
+                )
+        library = self.list_library_items()
+        archived = [item for item in library if item["local_availability"] == "archived"]
+        active = [item for item in library if item["local_availability"] != "archived"]
+        month_list = [
+            {
+                **{key: value for key, value in bucket.items() if key != "unique"},
+                "unique_model_count": len(bucket["unique"]),
+            }
+            for _, bucket in sorted(months.items())
+        ]
+        return {
+            "days": days,
+            "period_start": period_start.isoformat() if period_start else None,
+            "download_count": len(rows),
+            "unique_model_count": len(unique_models),
+            "total_bytes": total_bytes,
+            "archived_model_count": len(archived),
+            "archived_bytes": sum(int(item["total_bytes"]) for item in archived),
+            "active_bytes": sum(int(item["total_bytes"]) for item in active),
+            "months": month_list,
+            "categories": categories,
+            "recent_downloads": recent,
+        }
+
+    def list_user_tags(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            return [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "usage_count": int(row["usage_count"]),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT user_tags.id, user_tags.name, COUNT(library_user_tags.tag_id) usage_count
+                    FROM user_tags
+                    LEFT JOIN library_user_tags ON library_user_tags.tag_id=user_tags.id
+                    GROUP BY user_tags.id, user_tags.name
+                    ORDER BY user_tags.name COLLATE NOCASE
+                    """
+                ).fetchall()
+            ]
+
+    def create_user_tag(self, tag_id: str, name: str) -> dict[str, Any]:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("標籤名稱不可為空白")
+        now = utc_now()
+        try:
+            with self._write_lock, self.connect() as conn:
+                conn.execute(
+                    "INSERT INTO user_tags(id, name, normalized_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (tag_id, clean_name, clean_name.casefold(), now, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("已有同名的 user 標籤") from exc
+        return {"id": tag_id, "name": clean_name, "usage_count": 0}
+
+    def rename_user_tag(self, tag_id: str, name: str) -> dict[str, Any]:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("標籤名稱不可為空白")
+        try:
+            with self._write_lock, self.connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE user_tags SET name=?, normalized_name=?, updated_at=? WHERE id=?",
+                    (clean_name, clean_name.casefold(), utc_now(), tag_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("找不到 user 標籤")
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("已有同名的 user 標籤") from exc
+        return next(tag for tag in self.list_user_tags() if tag["id"] == tag_id)
+
+    def delete_user_tag(self, tag_id: str) -> None:
+        with self._write_lock, self.connect() as conn:
+            cursor = conn.execute("DELETE FROM user_tags WHERE id=?", (tag_id,))
+            if cursor.rowcount == 0:
+                raise ValueError("找不到 user 標籤")
+
+    def add_user_tag_to_record(self, record_id: str, tag_id: str) -> None:
+        with self._write_lock, self.connect() as conn:
+            source = conn.execute(
+                "SELECT provider, repo_type, remote_id FROM download_records WHERE id=?",
+                (record_id,),
+            ).fetchone()
+            if not source:
+                raise ValueError("找不到內容庫項目")
+            if not conn.execute("SELECT 1 FROM user_tags WHERE id=?", (tag_id,)).fetchone():
+                raise ValueError("找不到 user 標籤")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO library_user_tags(
+                    provider, repo_type, remote_id, tag_id, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (source["provider"], source["repo_type"], source["remote_id"], tag_id, utc_now()),
+            )
+
+    def remove_user_tag_from_record(self, record_id: str, tag_id: str) -> None:
+        with self._write_lock, self.connect() as conn:
+            source = conn.execute(
+                "SELECT provider, repo_type, remote_id FROM download_records WHERE id=?",
+                (record_id,),
+            ).fetchone()
+            if not source:
+                raise ValueError("找不到內容庫項目")
+            conn.execute(
+                """
+                DELETE FROM library_user_tags
+                WHERE provider=? AND repo_type=? AND remote_id=? AND tag_id=?
+                """,
+                (source["provider"], source["repo_type"], source["remote_id"], tag_id),
+            )
+
+    def library_identity_records(self, record_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            record = conn.execute("SELECT * FROM download_records WHERE id=?", (record_id,)).fetchone()
+            if not record:
+                raise ValueError("找不到內容庫項目")
+            return [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM download_records
+                    WHERE provider=? AND repo_type=? AND remote_id=?
+                      AND resolved_revision=? AND destination=?
+                    """,
+                    (
+                        record["provider"], record["repo_type"], record["remote_id"],
+                        record["resolved_revision"], record["destination"],
+                    ),
+                ).fetchall()
+            ]
+
+    def mark_library_archived(self, record_id: str) -> list[str]:
+        now = utc_now()
+        records = self.library_identity_records(record_id)
+        record_ids = [record["id"] for record in records]
+        marks = ",".join("?" for _ in record_ids)
+        with self._write_lock, self.connect() as conn:
+            conn.execute(
+                f"UPDATE download_records SET local_availability='archived', archived_at=?, last_reconciled_at=? WHERE id IN ({marks})",
+                (now, now, *record_ids),
+            )
+            conn.execute(
+                f"""
+                UPDATE download_record_files
+                SET local_status='archived', observed_size=NULL, observed_mtime_ns=NULL,
+                    observed_sha256=NULL, last_reconciled_at=?
+                WHERE record_id IN ({marks}) AND transfer_status='completed'
+                """,
+                (now, *record_ids),
+            )
+        return record_ids
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -805,12 +1184,13 @@ class Database:
                 raise ValueError("Download history was not found")
             if record["transfer_status"] != "completed":
                 raise ValueError("Only completed download history can restore moved files")
-            if record["local_availability"] not in {"moved", "partial"}:
+            if record["local_availability"] not in {"moved", "partial", "archived"}:
                 raise ValueError("This download has no moved files to restore")
             missing = conn.execute(
                 """
                 SELECT id, path FROM download_record_files
-                WHERE record_id=? AND transfer_status='completed' AND local_status='moved'
+                WHERE record_id=? AND transfer_status='completed'
+                  AND local_status IN ('moved', 'archived')
                 ORDER BY path
                 """,
                 (task_id,),
@@ -963,7 +1343,7 @@ class Database:
             params: tuple[str, ...] = (record_id,) if record_id else ()
             where = "WHERE id=?" if record_id else ""
             records = conn.execute(
-                f"SELECT id, destination, transfer_status, local_availability FROM download_records {where}",
+                f"SELECT id, destination, transfer_status, local_availability, archived_at FROM download_records {where}",
                 params,
             ).fetchall()
             result: list[dict[str, Any]] = []
@@ -992,8 +1372,13 @@ class Database:
     ) -> None:
         with self._write_lock, self.connect() as conn:
             conn.execute(
-                "UPDATE download_records SET local_availability=?, last_reconciled_at=? WHERE id=?",
-                (availability, reconciled_at, record_id),
+                """
+                UPDATE download_records
+                SET local_availability=?, last_reconciled_at=?,
+                    archived_at=CASE WHEN ?='archived' THEN archived_at ELSE NULL END
+                WHERE id=?
+                """,
+                (availability, reconciled_at, availability, record_id),
             )
             conn.executemany(
                 """
@@ -1021,7 +1406,7 @@ class Database:
                     SELECT tasks.id FROM tasks
                     JOIN download_records ON download_records.id=tasks.id
                     WHERE tasks.status='completed' AND tasks.updated_at<?
-                      AND download_records.local_availability NOT IN ('moved', 'unknown')
+                      AND download_records.local_availability NOT IN ('moved', 'archived', 'unknown')
                     ORDER BY tasks.updated_at
                     """,
                     (updated_before,),

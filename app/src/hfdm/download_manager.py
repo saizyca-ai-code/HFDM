@@ -141,6 +141,16 @@ class DownloadManager:
                     token,
                     deduplicate=False,
                 )
+                manually_dated = next(
+                    (task for task in matches if task.get("timeline_date_edited_at")),
+                    None,
+                )
+                if manually_dated is not None:
+                    self.db.set_library_timeline_date(
+                        consolidated["id"],
+                        manually_dated.get("timeline_date"),
+                    )
+                    consolidated = self.db.get_task(consolidated["id"])
                 for task in matches:
                     self.db.delete_task(task["id"])
                     self._tokens.pop(task["id"], None)
@@ -392,6 +402,28 @@ class DownloadManager:
         self.reconcile(task_id)
         self._publish(task_id, "files_deleted")
         return self._require_task(task_id)
+
+    def archive_library_item(self, record_id: str) -> dict[str, Any]:
+        task = self._require_task(record_id)
+        try:
+            records = self.db.library_identity_records(record_id)
+        except ValueError as exc:
+            raise DownloadManagerError(str(exc)) from exc
+        record_ids = {record["id"] for record in records}
+        with self._lock:
+            if any(worker.task_id in record_ids for worker in self._active.values()):
+                raise DownloadManagerError("傳輸進行中，請先暫停或取消後再封存")
+        if any(record["transfer_status"] in {"queued", "resolving", "downloading", "pausing"} for record in records):
+            raise DownloadManagerError("傳輸進行中，請先暫停或取消後再封存")
+        if not self.db.get_settings()["allow_delete_files"]:
+            raise DownloadManagerError("管理者設定目前禁止刪除實體檔案")
+        destination = self.task_destination(task)
+        if destination.exists():
+            self._remove_tree(destination)
+        archived_ids = self.db.mark_library_archived(record_id)
+        for archived_id in archived_ids:
+            self._publish(archived_id, "archived")
+        return {"archived": True, "record_ids": archived_ids}
 
     def _run(self) -> None:
         while not self._stop.is_set():

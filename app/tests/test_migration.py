@@ -95,5 +95,12 @@ def test_v2_to_v3_migration_creates_distinct_backup(tmp_path: Path) -> None:
         file_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(download_record_files)").fetchall()
         }
-    assert {"display_name", "provider_metadata"} <= record_columns
+    assert {
+        "display_name",
+        "provider_metadata",
+        "source_created_at",
+        "source_updated_at",
+        "timeline_date",
+        "timeline_date_edited_at",
+    } <= record_columns
     assert {"remote_id", "download_url", "provider_metadata"} <= file_columns

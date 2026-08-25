@@ -132,6 +132,7 @@ def test_same_source_version_is_reused_or_merged_without_duplicate_tasks(tmp_pat
     )
 
     original = manager.create_task(resolution, ["fp16.safetensors"], None)
+    manager.db.set_library_timeline_date(original["id"], "2024-02-03")
     reused = manager.create_task(resolution, ["fp16.safetensors"], None)
     merged = manager.create_task(resolution, ["fp8.safetensors"], None)
 
@@ -141,6 +142,8 @@ def test_same_source_version_is_reused_or_merged_without_duplicate_tasks(tmp_pat
         "fp16.safetensors",
         "fp8.safetensors",
     }
+    assert merged["timeline_date"] == "2024-02-03"
+    assert merged["timeline_date_edited_at"] is not None
     assert [task["id"] for task in manager.db.list_tasks()] == [merged["id"]]
 
 

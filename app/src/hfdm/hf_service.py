@@ -9,6 +9,25 @@ from .schemas import RepoFileInfo, RepoResolution
 
 
 class HuggingFaceService:
+    def source_dates(
+        self,
+        repo_id: str,
+        revision: str,
+        token: str | None = None,
+        repo_type: str = "model",
+    ) -> tuple[str | None, str | None]:
+        api = HfApi(token=token or False, library_name="hfdm")
+        if repo_type == "dataset":
+            info = api.dataset_info(repo_id, revision=revision, token=token or False)
+        else:
+            info = api.model_info(repo_id, revision=revision, token=token or False)
+        created_at = getattr(info, "created_at", None)
+        updated_at = getattr(info, "last_modified", None)
+        return (
+            created_at.isoformat() if created_at else None,
+            updated_at.isoformat() if updated_at else None,
+        )
+
     def resolve(
         self,
         source: str,
@@ -73,4 +92,16 @@ class HuggingFaceService:
             files=files,
             total_bytes=sum(item.size for item in files),
             suggested_files=suggested,
+            provider_metadata={
+                "source_created_at": (
+                    created_at.isoformat()
+                    if (created_at := getattr(info, "created_at", None))
+                    else None
+                ),
+                "source_updated_at": (
+                    updated_at.isoformat()
+                    if (updated_at := getattr(info, "last_modified", None))
+                    else None
+                ),
+            },
         )

@@ -31,10 +31,16 @@ class DownloadReconciler:
                 updated += 1
                 continue
 
-            observations = [
-                self._observe(record["id"], destination, file, reconciled_at, allow_hash)
-                for file in completed_files
-            ]
+            if record.get("archived_at") and not destination.exists():
+                observations = [
+                    self._archived_observation(record["id"], file, reconciled_at)
+                    for file in completed_files
+                ]
+            else:
+                observations = [
+                    self._observe(record["id"], destination, file, reconciled_at, allow_hash)
+                    for file in completed_files
+                ]
             statuses = [item["local_status"] for item in observations]
             if "changed" in statuses:
                 availability = "changed"
@@ -42,6 +48,8 @@ class DownloadReconciler:
                 availability = "unknown"
             elif all(status == "available" for status in statuses):
                 availability = "available"
+            elif all(status == "archived" for status in statuses):
+                availability = "archived"
             elif all(status == "moved" for status in statuses):
                 availability = "moved"
             else:
@@ -49,6 +57,22 @@ class DownloadReconciler:
             self.db.apply_reconciliation(record["id"], availability, observations, reconciled_at)
             updated += 1
         return updated
+
+    @staticmethod
+    def _archived_observation(
+        record_id: str,
+        file: dict[str, Any],
+        reconciled_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": file["id"],
+            "record_id": record_id,
+            "local_status": "archived",
+            "observed_size": None,
+            "observed_mtime_ns": None,
+            "observed_sha256": None,
+            "last_reconciled_at": reconciled_at,
+        }
 
     def _safe_path(self, relative_text: str) -> Path:
         relative = PurePosixPath(relative_text)

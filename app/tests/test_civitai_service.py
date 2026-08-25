@@ -103,3 +103,24 @@ def test_file_role_overrides_page_model_type_for_comfyui_folder() -> None:
     assert service._comfyui_folder("Text Encoder", "Checkpoint") == "text_encoders"
     assert service._comfyui_folder("Model", "Checkpoint") == "checkpoints"
     assert service._comfyui_folder("Model", "LORA") == "loras"
+
+
+def test_source_dates_fetches_the_original_version_directly() -> None:
+    requests = []
+
+    def opener(request, timeout=0):
+        requests.append(request)
+        return JsonResponse(
+            {
+                "id": 456,
+                "modelId": 123,
+                "createdAt": "2025-12-18T08:55:00.000Z",
+                "updatedAt": "2026-01-02T03:04:05.000Z",
+            }
+        )
+
+    dates = CivitaiService(opener).source_dates("models/123", "456", "civitai_secret")
+
+    assert dates == ("2025-12-18T08:55:00.000Z", "2026-01-02T03:04:05.000Z")
+    assert requests[0].full_url == "https://civitai.com/api/v1/model-versions/456"
+    assert requests[0].get_header("Authorization") == "Bearer civitai_secret"

@@ -41,7 +41,7 @@ export type TaskFile = {
   status: string
   downloaded_bytes: number
   error?: string | null
-  local_status: "available" | "partial" | "moved" | "changed" | "unknown"
+  local_status: "available" | "partial" | "moved" | "archived" | "changed" | "unknown"
   observed_size?: number | null
   observed_mtime_ns?: number | null
   remote_id?: string | null
@@ -58,7 +58,7 @@ export type DownloadTask = {
   commit_hash: string
   status: string
   transfer_status: string
-  local_availability: "available" | "partial" | "moved" | "changed" | "unknown"
+  local_availability: "available" | "partial" | "moved" | "archived" | "changed" | "unknown"
   total_bytes: number
   downloaded_bytes: number
   speed_bps: number
@@ -93,7 +93,7 @@ export type LibraryFile = {
   id: string
   path: string
   size: number
-  local_status: "available" | "partial" | "moved" | "changed" | "unknown"
+  local_status: "available" | "partial" | "moved" | "archived" | "changed" | "unknown"
   observed_size?: number | null
   provider_metadata: Record<string, unknown>
 }
@@ -108,14 +108,55 @@ export type LibraryItem = {
   destination: string
   latest_record_id: string
   latest_transfer_status: string
-  local_availability: "available" | "partial" | "moved" | "changed" | "unknown"
+  local_availability: "available" | "partial" | "moved" | "archived" | "changed" | "unknown"
   history_count: number
   total_bytes: number
   requires_token: boolean
   display_name?: string | null
+  source_created_at?: string | null
+  source_updated_at?: string | null
+  timeline_date?: string | null
+  timeline_date_edited_at?: string | null
   provider_metadata: Record<string, unknown>
+  user_tags: UserTag[]
   restore_record_ids: string[]
   files: LibraryFile[]
+}
+
+export type DashboardMonth = {
+  month: string
+  download_count: number
+  unique_model_count: number
+  total_bytes: number
+  categories: Record<string, number>
+}
+
+export type DashboardData = {
+  days: number
+  period_start?: string | null
+  download_count: number
+  unique_model_count: number
+  total_bytes: number
+  archived_model_count: number
+  archived_bytes: number
+  active_bytes: number
+  months: DashboardMonth[]
+  categories: Record<string, number>
+  recent_downloads: Array<{
+    record_id: string
+    provider: string
+    repo_type: string
+    repo_id: string
+    display_name?: string | null
+    completed_at: string
+    total_bytes: number
+  }>
+}
+
+export type UserTag = {
+  id: string
+  name: string
+  usage_count: number
 }
 
 export type AppSettings = {
@@ -145,6 +186,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function requestVoid(path: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(path, init)
+  if (!response.ok) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail || `Request failed (${response.status})`)
+  }
+}
+
 export const api = {
   identity: () => request<{ role: "admin" | "visitor"; is_admin: boolean }>("/api/identity"),
   resolveRepo: (source: string, token: string, includeGlobs: string[] = [], excludeGlobs: string[] = [], versionId?: number) =>
@@ -159,6 +208,25 @@ export const api = {
     }),
   tasks: () => request<DownloadTask[]>("/api/tasks"),
   library: () => request<LibraryItem[]>("/api/library"),
+  dashboard: (days = 90) => request<DashboardData>(`/api/dashboard?days=${days}`),
+  updateTimelineDate: (recordId: string, timelineDate: string | null) =>
+    request<{ updated: boolean }>(`/api/library/${encodeURIComponent(recordId)}/timeline-date`, {
+      method: "PUT",
+      body: JSON.stringify({ timeline_date: timelineDate || null }),
+    }),
+  refreshSourceDate: (recordId: string, provider: string, token = "", applySourceDate = false) =>
+    request<{ source_created_at: string; source_updated_at?: string | null; timeline_date?: string | null; timeline_date_preserved: boolean; timeline_date_restored: boolean }>(`/api/library/${encodeURIComponent(recordId)}/refresh-source-date`, {
+      method: "POST",
+      body: JSON.stringify({ [provider === "civitai" ? "civitai_token" : "hf_token"]: token || null, apply_source_date: applySourceDate }),
+    }),
+  archiveLibraryItem: (recordId: string) =>
+    request<{ archived: boolean; record_ids: string[] }>(`/api/library/${encodeURIComponent(recordId)}/archive`, { method: "POST" }),
+  userTags: () => request<UserTag[]>("/api/user-tags"),
+  createUserTag: (name: string) => request<UserTag>("/api/user-tags", { method: "POST", body: JSON.stringify({ name }) }),
+  renameUserTag: (tagId: string, name: string) => request<UserTag>(`/api/user-tags/${encodeURIComponent(tagId)}`, { method: "PUT", body: JSON.stringify({ name }) }),
+  deleteUserTag: (tagId: string) => requestVoid(`/api/user-tags/${encodeURIComponent(tagId)}`, { method: "DELETE" }),
+  addLibraryUserTag: (recordId: string, tagId: string) => requestVoid(`/api/library/${encodeURIComponent(recordId)}/user-tags/${encodeURIComponent(tagId)}`, { method: "PUT" }),
+  removeLibraryUserTag: (recordId: string, tagId: string) => requestVoid(`/api/library/${encodeURIComponent(recordId)}/user-tags/${encodeURIComponent(tagId)}`, { method: "DELETE" }),
   openLibraryFolder: (recordId: string, scope: "source" | "version") =>
     request<{ opened: boolean }>(`/api/library/${encodeURIComponent(recordId)}/open-folder?scope=${scope}`, { method: "POST" }),
   inspectTask: (taskId: string, provider: string, token = "", versionId?: number) =>

@@ -67,6 +67,24 @@ class CivitaiService:
                 selected = None
         return self.resolve(source, token, selected)
 
+    def source_dates(
+        self,
+        repo_id: str,
+        version_id: str,
+        token: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        try:
+            model_id = int(repo_id.split("/", 1)[1])
+            selected_id = int(version_id)
+        except (IndexError, ValueError) as exc:
+            raise CivitaiServiceError("Civitai history identity is invalid", status_code=422) from exc
+        selected = self._get_json(f"/model-versions/{selected_id}", token)
+        returned_version_id = int(selected.get("id") or 0)
+        returned_model_id = int(selected.get("modelId") or 0)
+        if returned_version_id != selected_id or returned_model_id != model_id:
+            raise CivitaiServiceError("Civitai version 與下載紀錄不一致", status_code=422)
+        return selected.get("createdAt"), selected.get("updatedAt")
+
     def _get_json(self, path: str, token: str | None) -> dict[str, Any]:
         headers = {"Accept": "application/json", "User-Agent": "HFDM/2"}
         if token:
@@ -153,6 +171,8 @@ class CivitaiService:
                 "trained_words": selected.get("trainedWords") or [],
                 "preview_url": preview,
                 "requires_token": bool(token),
+                "source_created_at": selected.get("createdAt"),
+                "source_updated_at": selected.get("updatedAt"),
             },
         )
 

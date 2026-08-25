@@ -1,12 +1,14 @@
 import {
   Activity,
   Archive,
+  BarChart3,
   Box,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleGauge,
+  CalendarDays,
   Download,
   ExternalLink,
   FileDown,
@@ -34,16 +36,17 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { FileTree } from "@/components/file-tree"
+import { useAppDialog } from "@/components/ui/app-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
-import { api, fileDownloadUrl, type AppSettings, type DownloadTask, type LibraryFile, type LibraryItem, type RepoResolution, type TaskInspection } from "@/lib/api"
+import { api, fileDownloadUrl, type AppSettings, type DashboardData, type DownloadTask, type LibraryFile, type LibraryItem, type RepoResolution, type TaskInspection, type UserTag } from "@/lib/api"
 import { cn, formatBytes, formatEta, percent } from "@/lib/utils"
 
-type Page = "huggingface" | "civitai" | "transfers" | "library" | "settings"
+type Page = "huggingface" | "civitai" | "transfers" | "library" | "dashboard" | "settings"
 type DownloadProvider = "huggingface" | "civitai"
 type SourceCategory = "hf-model" | "hf-dataset" | "civitai-model"
 
@@ -169,6 +172,7 @@ const availabilityMeta: Record<string, { label: string; className: string }> = {
   available: { label: "Available", className: "border-emerald-400/20 bg-emerald-400/10 text-emerald-300" },
   partial: { label: "Partial", className: "border-orange-400/20 bg-orange-400/10 text-orange-300" },
   moved: { label: "Moved", className: "border-slate-400/20 bg-slate-400/10 text-slate-300" },
+  archived: { label: "Archived", className: "border-rose-400/40 bg-rose-400/20 text-rose-200 shadow-[0_0_16px_rgba(251,113,133,.12)]" },
   changed: { label: "Changed", className: "border-rose-400/20 bg-rose-400/10 text-rose-300" },
   unknown: { label: "Unknown", className: "border-violet-400/20 bg-violet-400/10 text-violet-300" },
 }
@@ -244,6 +248,7 @@ function App() {
           <NavButton active={page === "civitai"} icon={Box} label="從 Civitai 下載" onClick={() => setPage("civitai")} />
           <NavButton active={page === "transfers"} icon={Activity} label="傳輸任務" count={activeCount} onClick={() => setPage("transfers")} />
           <NavButton active={page === "library"} icon={Library} label="內容庫" onClick={() => setPage("library")} />
+          <NavButton active={page === "dashboard"} icon={BarChart3} label="分析總覽" onClick={() => setPage("dashboard")} />
           <NavButton active={page === "settings"} icon={SettingsIcon} label="服務設定" onClick={() => setPage("settings")} />
         </nav>
         <div className="mt-auto rounded-xl border border-white/[.06] bg-white/[.025] p-3.5">
@@ -275,15 +280,17 @@ function App() {
           {page === "civitai" && <NewDownload provider="civitai" draft={civitaiDraft} setDraft={setCivitaiDraft} tasks={tasks} creationBehavior={creationBehavior} setCreationBehavior={setCreationBehavior} onCreated={() => { if (creationBehavior.clearAfterCreate) setCivitaiDraft(emptyDownloadDraft()); void refreshTasks(); if (creationBehavior.openTransfersAfterCreate) setPage("transfers") }} />}
           {page === "transfers" && <Transfers tasks={tasks} isAdmin={isAdmin} refresh={refreshTasks} />}
           {page === "library" && <LibraryPage items={library} isAdmin={isAdmin} refresh={refreshTasks} />}
+          {page === "dashboard" && <DashboardPage items={library} isAdmin={isAdmin} refreshLibrary={refreshTasks} />}
           {page === "settings" && <SettingsPage isAdmin={isAdmin} />}
         </div>
       </main>
 
-      <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-2xl border border-white/10 bg-[#0c1219]/95 p-1.5 shadow-2xl backdrop-blur-xl lg:hidden">
+      <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-6 rounded-2xl border border-white/10 bg-[#0c1219]/95 p-1.5 shadow-2xl backdrop-blur-xl lg:hidden">
         <MobileNav active={page === "huggingface"} icon={Download} label="HF" onClick={() => setPage("huggingface")} />
         <MobileNav active={page === "civitai"} icon={Box} label="Civitai" onClick={() => setPage("civitai")} />
         <MobileNav active={page === "transfers"} icon={Activity} label="任務" onClick={() => setPage("transfers")} />
         <MobileNav active={page === "library"} icon={Library} label="內容" onClick={() => setPage("library")} />
+        <MobileNav active={page === "dashboard"} icon={BarChart3} label="分析" onClick={() => setPage("dashboard")} />
         <MobileNav active={page === "settings"} icon={SettingsIcon} label="設定" onClick={() => setPage("settings")} />
       </nav>
     </div>
@@ -502,6 +509,7 @@ function CivitaiTaskGroup({ tasks, isAdmin, refresh }: { tasks: DownloadTask[]; 
 }
 
 function TaskCard({ task, isAdmin, refresh, compact = false }: { task: DownloadTask; isAdmin: boolean; refresh: () => Promise<void>; compact?: boolean }) {
+  const dialog = useAppDialog()
   const [expanded, setExpanded] = useState(false)
   const [token, setToken] = useState("")
   const [error, setError] = useState("")
@@ -521,17 +529,27 @@ function TaskCard({ task, isAdmin, refresh, compact = false }: { task: DownloadT
     finally { setBusy(false) }
   }
   const removeHistory = async () => {
-    if (!window.confirm("只刪除這筆下載歷史嗎？實體檔案不會被刪除。")) return
+    if (!await dialog.confirm({
+      title: "刪除下載歷史",
+      description: "只會刪除這筆傳輸紀錄，已下載的實體檔案不受影響。",
+      confirmLabel: "刪除紀錄",
+      tone: "danger",
+    })) return
     setBusy(true); setError("")
     try { await api.deleteTask(task.id, false); await refresh() }
     catch (reason) { setError(reason instanceof Error ? reason.message : "刪除失敗") }
     finally { setBusy(false) }
   }
   const removeFiles = async () => {
-    if (!window.confirm("只刪除 HFDM download/ 內的實體檔案嗎？下載歷史會保留並顯示為 Moved。")) return
+    if (!await dialog.confirm({
+      title: "封存模型內容",
+      description: "HFDM download/ 內的實體檔案將被刪除，但模型資訊與所有下載歷史都會保留。",
+      confirmLabel: "封存並釋放空間",
+      tone: "danger",
+    })) return
     setBusy(true); setError("")
-    try { await api.deleteTaskFiles(task.id); await refresh() }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "刪除檔案失敗") }
+    try { await api.archiveLibraryItem(task.id); await refresh() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "封存失敗") }
     finally { setBusy(false) }
   }
   const inspectRepo = async (versionId?: number) => {
@@ -582,7 +600,7 @@ function TaskCard({ task, isAdmin, refresh, compact = false }: { task: DownloadT
           {["paused", "auth_required"].includes(task.status) && <Button size="sm" disabled={busy} onClick={() => void command("resume")}><Play className="size-3.5" />繼續</Button>}
           {["failed", "partial"].includes(task.status) && <Button size="sm" disabled={busy} onClick={() => void command("retry")}><RotateCcw className="size-3.5" />重試</Button>}
           {!task.status.match(/completed|cancelled/) && <Button variant="ghost" size="icon" disabled={busy} onClick={() => void command("cancel")} aria-label="取消"><Square className="size-3.5" /></Button>}
-          {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="ghost" size="icon" disabled={busy || task.local_availability === "moved" || task.local_availability === "unknown"} onClick={() => void removeFiles()} aria-label="只刪除實體檔案" title="只刪除實體檔案"><HardDrive className="size-3.5" /></Button>}
+          {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="ghost" size="icon" disabled={busy || task.local_availability === "archived" || task.local_availability === "unknown"} onClick={() => void removeFiles()} aria-label="封存模型內容" title="刪除實體檔案並保留歷史"><Archive className="size-3.5" /></Button>}
           {["completed", "cancelled", "failed", "partial", "paused"].includes(task.status) && <Button variant="destructive" size="icon" disabled={busy} onClick={() => void removeHistory()} aria-label="只刪除歷史" title="只刪除歷史"><Trash2 className="size-3.5" /></Button>}
         </div>}
       </div>
@@ -619,6 +637,65 @@ function metadataList(metadata: Record<string, unknown>, key: string): string[] 
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : []
 }
 
+function UserTagControls({ item, catalog, isAdmin, onChanged }: { item: LibraryItem; catalog: UserTag[]; isAdmin: boolean; onChanged: () => Promise<void> }) {
+  const dialog = useAppDialog()
+  const assigned = new Set(item.user_tags.map((tag) => tag.id))
+  const add = async (tagId: string) => {
+    if (!tagId) return
+    await api.addLibraryUserTag(item.latest_record_id, tagId)
+    await onChanged()
+  }
+  const create = async () => {
+    const name = (await dialog.prompt({
+      title: "新增使用者標籤",
+      description: "建立後會直接套用到這個模型，且不會變更來源提供的標籤。",
+      label: "標籤名稱",
+      placeholder: "例如：常用、待測試、角色模型",
+      confirmLabel: "建立並套用",
+      maxLength: 80,
+    }))?.trim()
+    if (!name) return
+    const tag = await api.createUserTag(name)
+    await api.addLibraryUserTag(item.latest_record_id, tag.id)
+    await onChanged()
+  }
+  const rename = async (tag: UserTag) => {
+    const name = (await dialog.prompt({
+      title: "重新命名使用者標籤",
+      description: `此變更會同步顯示於所有使用「${tag.name}」的模型。`,
+      label: "標籤名稱",
+      initialValue: tag.name,
+      confirmLabel: "儲存名稱",
+      maxLength: 80,
+    }))?.trim()
+    if (!name || name === tag.name) return
+    await api.renameUserTag(tag.id, name)
+    await onChanged()
+  }
+  const remove = async (tag: UserTag) => {
+    await api.removeLibraryUserTag(item.latest_record_id, tag.id)
+    await onChanged()
+  }
+  const destroy = async (tag: UserTag) => {
+    if (!await dialog.confirm({
+      title: `刪除「${tag.name}」標籤`,
+      description: "它會從所有模型移除，但不影響來源標籤或模型內容。",
+      confirmLabel: "永久刪除標籤",
+      tone: "danger",
+    })) return
+    await api.deleteUserTag(tag.id)
+    await onChanged()
+  }
+  return <div className="mt-3 border-t border-white/[.055] pt-3">
+    <div className="mb-2 text-[9px] font-bold uppercase tracking-[.18em] text-cyan-300/55">User 標籤 · 可編輯</div>
+    <div className="flex flex-wrap items-center gap-1.5">
+      {item.user_tags.map((tag) => <span key={tag.id} className="flex items-center gap-1 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] text-cyan-200"><span>#{tag.name}</span>{isAdmin && <><button type="button" onClick={() => void rename(tag)} className="text-cyan-300/60 hover:text-white" aria-label={`重新命名 ${tag.name}`}>✎</button><button type="button" onClick={() => void remove(tag)} className="text-cyan-300/60 hover:text-white" aria-label={`從模型移除 ${tag.name}`}><X className="size-3" /></button><button type="button" onClick={() => void destroy(tag)} className="text-rose-300/55 hover:text-rose-200" aria-label={`刪除標籤 ${tag.name}`}><Trash2 className="size-3" /></button></>}</span>)}
+      {!item.user_tags.length && <span className="text-[10px] text-slate-600">尚未分類</span>}
+      {isAdmin && <><select aria-label="套用 user 標籤" value="" onChange={(event) => void add(event.target.value)} className="h-7 rounded-md border border-white/10 bg-[#0c131b] px-2 text-[10px] text-slate-300"><option value="">套用標籤…</option>{catalog.filter((tag) => !assigned.has(tag.id)).map((tag) => <option key={tag.id} value={tag.id}>#{tag.name}</option>)}</select><Button variant="ghost" size="sm" className="h-7 px-2 text-[10px]" onClick={() => void create()}><Plus className="size-3" />新增</Button></>}
+    </div>
+  </div>
+}
+
 function CivitaiLibraryMetadata({ item, selectedTags, onTag, onModelType, onBaseModel, onCreator }: { item: LibraryItem; selectedTags: string[]; onTag: (tag: string) => void; onModelType: (value: string) => void; onBaseModel: (value: string) => void; onCreator: (value: string) => void }) {
   const tags = metadataList(item.provider_metadata, "tags")
   const modelType = metadataText(item.provider_metadata, "model_type")
@@ -627,28 +704,28 @@ function CivitaiLibraryMetadata({ item, selectedTags, onTag, onModelType, onBase
   const creator = metadataText(item.provider_metadata, "creator")
   return <div className="mb-3 space-y-2.5 rounded-lg border border-amber-300/10 bg-amber-300/[.025] p-3 text-xs">
     <div><div className="mb-1.5 text-[9px] font-bold uppercase tracking-[.18em] text-amber-300/45">模型屬性 · 點擊可過濾</div><div className="flex flex-wrap gap-1.5">{modelType && <button type="button" onClick={() => onModelType(modelType)} className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-200 hover:bg-amber-300/20">Type · {modelType}</button>}{baseModel && <button type="button" onClick={() => onBaseModel(baseModel)} className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-violet-200 hover:bg-violet-300/20">Base · {baseModel}{baseModelType ? ` · ${baseModelType}` : ""}</button>}{creator && <button type="button" onClick={() => onCreator(creator)} className="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-sky-200 hover:bg-sky-300/20">Creator · {creator}</button>}</div></div>
-    {tags.length > 0 && <div className="border-t border-white/[.045] pt-2"><div className="mb-1.5 text-[9px] font-bold uppercase tracking-[.18em] text-slate-600">標籤 · 可多選</div><div className="flex flex-wrap gap-1.5">{tags.map((tag) => <button key={tag} type="button" aria-pressed={selectedTags.includes(tag)} onClick={() => onTag(tag)} className={cn("rounded-full border px-2 py-0.5 text-[10px] transition", selectedTags.includes(tag) ? "border-cyan-300/35 bg-cyan-300/15 text-cyan-200" : "border-white/[.07] bg-white/[.035] text-slate-400 hover:border-cyan-400/30 hover:text-cyan-300")}>#{tag}</button>)}</div></div>}
+    {tags.length > 0 && <div className="border-t border-white/[.045] pt-2"><div className="mb-1.5 text-[9px] font-bold uppercase tracking-[.18em] text-slate-600">來源標籤 · 唯讀 · 可多選過濾</div><div className="flex flex-wrap gap-1.5">{tags.map((tag) => <button key={tag} type="button" aria-pressed={selectedTags.includes(tag)} onClick={() => onTag(tag)} className={cn("rounded-full border px-2 py-0.5 text-[10px] transition", selectedTags.includes(tag) ? "border-cyan-300/35 bg-cyan-300/15 text-cyan-200" : "border-white/[.07] bg-white/[.035] text-slate-400 hover:border-cyan-400/30 hover:text-cyan-300")}>#{tag}</button>)}</div></div>}
   </div>
 }
 
-function LibraryVersionCard({ item, isAdmin, restoringId, restore, openingFolderId, openFolder }: { item: LibraryItem; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void }) {
+function LibraryVersionCard({ item, isAdmin, restoringId, restore, archivingId, archiveItem, openingFolderId, openFolder, userTags, onTagsChanged }: { item: LibraryItem; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; archivingId: string | null; archiveItem: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void; userTags: UserTag[]; onTagsChanged: () => Promise<void> }) {
   const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
   const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
-  return <Card><CardHeader><div className="flex items-start justify-between gap-3"><div><div className="flex items-center gap-2"><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3>{isAdmin && <Button variant="ghost" size="icon" className="size-7" onClick={() => openFolder(item.latest_record_id, "version")} disabled={openingFolderId === item.latest_record_id} aria-label={`開啟 ${item.display_name || item.repo_id} 本機資料夾`} title="在 Windows Explorer 開啟本機資料夾">{openingFolderId === item.latest_record_id ? <LoaderCircle className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}</Button>}</div><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div>{isAdmin && item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <div className="mt-4 flex justify-end"><Button onClick={() => restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button></div>}</CardContent></Card>
+  return <Card><CardHeader><div className="flex items-start justify-between gap-3"><div><div className="flex items-center gap-2"><h3 className="font-semibold text-white">{item.display_name || item.repo_id}</h3>{isAdmin && item.local_availability !== "archived" && <Button variant="ghost" size="icon" className="size-7" onClick={() => openFolder(item.latest_record_id, "version")} disabled={openingFolderId === item.latest_record_id} aria-label={`開啟 ${item.display_name || item.repo_id} 本機資料夾`} title="在 Windows Explorer 開啟本機資料夾">{openingFolderId === item.latest_record_id ? <LoaderCircle className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}</Button>}</div><div className="mt-2"><SourceBadge provider={item.provider} repoType={item.repo_type} /></div><div className="mt-1 font-mono text-[10px] text-slate-600">{item.commit_hash.slice(0, 12)}</div></div><div className="flex flex-wrap justify-end gap-2"><Badge className={transfer.className}>Latest: {transfer.label}</Badge><Badge className={availability.className}>Local: {availability.label}</Badge>{item.history_count > 1 && <Badge>{item.history_count} 次傳輸</Badge>}</div></div></CardHeader><CardContent><div className="max-h-56 space-y-1 overflow-auto">{item.files.map((file) => <div key={file.path} className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-slate-400"><FileStatus status={file.local_status === "available" ? "completed" : file.local_status} /><span className="min-w-0 flex-1 truncate">{file.path}</span><span className={cn("text-[10px] uppercase", file.local_status === "available" ? "text-emerald-400" : file.local_status === "changed" ? "text-rose-400" : "text-slate-500")}>{file.local_status}</span><span className="font-mono text-slate-600">{formatBytes(file.size)}</span>{file.local_status === "available" && <a href={fileDownloadUrl(file.record_id, file.path)} className="text-cyan-400"><FileDown className="size-3.5" /></a>}</div>)}</div><UserTagControls item={item} catalog={userTags} isAdmin={isAdmin} onChanged={onTagsChanged} />{isAdmin && <div className="mt-4 flex flex-wrap justify-end gap-2">{item.local_availability !== "archived" && <Button variant="secondary" onClick={() => archiveItem(item)} disabled={archivingId === item.key}>{archivingId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <Archive className="size-4" />}封存內容</Button>}{item.restore_record_ids.length > 0 && ["moved", "partial", "archived"].includes(item.local_availability) && <Button onClick={() => restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "partial" ? "補回缺少檔案" : "重新下載全部"}</Button>}</div>}</CardContent></Card>
 }
 
-function CivitaiLibraryVersionRow({ item, isAdmin, restoringId, restore, openingFolderId, openFolder, selectedTags, onTag, onModelType, onBaseModel, onCreator }: { item: LibraryItem; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void; selectedTags: string[]; onTag: (tag: string) => void; onModelType: (value: string) => void; onBaseModel: (value: string) => void; onCreator: (value: string) => void }) {
+function CivitaiLibraryVersionRow({ item, isAdmin, restoringId, restore, archivingId, archiveItem, openingFolderId, openFolder, selectedTags, onTag, onModelType, onBaseModel, onCreator }: { item: LibraryItem; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; archivingId: string | null; archiveItem: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void; selectedTags: string[]; onTag: (tag: string) => void; onModelType: (value: string) => void; onBaseModel: (value: string) => void; onCreator: (value: string) => void }) {
   const [expanded, setExpanded] = useState(false)
   const transfer = statusMeta[item.latest_transfer_status] ?? { label: item.latest_transfer_status, className: "" }
   const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
   const versionName = metadataText(item.provider_metadata, "version_name") || item.requested_revision || item.commit_hash
-  return <div className="bg-[#0d141c]/55">
+  return <div className={cn("bg-[#0d141c]/55", item.local_availability === "archived" && "border-l-2 border-rose-400/60 bg-rose-400/[.08]")}>
     <div className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:px-4">
       <button type="button" onClick={() => setExpanded(!expanded)} className="group min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2"><ChevronDown className={cn("size-4 shrink-0 text-slate-600 transition-transform group-hover:text-cyan-300", expanded && "rotate-180")} /><h4 className="truncate font-semibold text-slate-100">{versionName}</h4><Badge className={transfer.className}>{transfer.label}</Badge><Badge className={availability.className}>{availability.label}</Badge></div>
         <div className="mt-1 flex flex-wrap gap-x-3 pl-6 text-[11px] text-slate-600"><span className="font-mono">Version {item.commit_hash}</span><span>{item.files.length} files</span><span>{formatBytes(item.total_bytes)}</span>{item.history_count > 1 && <span>{item.history_count} 次傳輸</span>}</div>
       </button>
-      {isAdmin && <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => openFolder(item.latest_record_id, "version")} disabled={openingFolderId === item.latest_record_id} aria-label={`開啟 ${versionName} 本機資料夾`} title="開啟此版本的本機資料夾">{openingFolderId === item.latest_record_id ? <LoaderCircle className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}</Button>{item.restore_record_ids.length > 0 && ["moved", "partial"].includes(item.local_availability) && <Button size="sm" onClick={() => restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "moved" ? "重新下載全部" : "補回缺少檔案"}</Button>}</div>}
+      {isAdmin && <div className="flex items-center gap-1.5">{item.local_availability !== "archived" && <Button variant="ghost" size="icon" onClick={() => openFolder(item.latest_record_id, "version")} disabled={openingFolderId === item.latest_record_id} aria-label={`開啟 ${versionName} 本機資料夾`} title="開啟此版本的本機資料夾">{openingFolderId === item.latest_record_id ? <LoaderCircle className="size-4 animate-spin" /> : <FolderOpen className="size-4" />}</Button>}{item.local_availability !== "archived" && <Button variant="secondary" size="sm" onClick={() => archiveItem(item)} disabled={archivingId === item.key}>{archivingId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <Archive className="size-4" />}封存</Button>}{item.restore_record_ids.length > 0 && ["moved", "partial", "archived"].includes(item.local_availability) && <Button size="sm" onClick={() => restore(item)} disabled={restoringId === item.key}>{restoringId === item.key ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}{item.local_availability === "partial" ? "補回缺檔" : "重新下載"}</Button>}</div>}
     </div>
     {expanded && <div className="border-t border-white/[.055] bg-[#080d13]/65 px-3 py-3 sm:px-4">
       <CivitaiLibraryMetadata item={item} selectedTags={selectedTags} onTag={onTag} onModelType={onModelType} onBaseModel={onBaseModel} onCreator={onCreator} />
@@ -704,7 +781,7 @@ function CivitaiSampleGallery({ images }: { images: GalleryImage[] }) {
   </>
 }
 
-function CivitaiLibraryGroup({ items, isAdmin, restoringId, restore, openingFolderId, openFolder, selectedTags, onTag, onModelType, onBaseModel, onCreator }: { items: LibraryItem[]; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void; selectedTags: string[]; onTag: (tag: string) => void; onModelType: (value: string) => void; onBaseModel: (value: string) => void; onCreator: (value: string) => void }) {
+function CivitaiLibraryGroup({ items, isAdmin, restoringId, restore, archivingId, archiveItem, openingFolderId, openFolder, selectedTags, onTag, onModelType, onBaseModel, onCreator, userTags, onTagsChanged }: { items: LibraryItem[]; isAdmin: boolean; restoringId: string | null; restore: (item: LibraryItem) => void; archivingId: string | null; archiveItem: (item: LibraryItem) => void; openingFolderId: string | null; openFolder: (recordId: string, scope: "source" | "version") => void; selectedTags: string[]; onTag: (tag: string) => void; onModelType: (value: string) => void; onBaseModel: (value: string) => void; onCreator: (value: string) => void; userTags: UserTag[]; onTagsChanged: () => Promise<void> }) {
   const totalFiles = new Set(items.flatMap((item) => item.files.map((file) => file.id || file.path))).size
   const totalBytes = items.reduce((sum, item) => sum + item.total_bytes, 0)
   const availableVersions = items.filter((item) => item.local_availability === "available").length
@@ -714,27 +791,71 @@ function CivitaiLibraryGroup({ items, isAdmin, restoringId, restore, openingFold
   const sourceUrl = civitaiModelUrl(items[0].repo_id)
   return <Card className="overflow-hidden border-cyan-400/15 bg-cyan-400/[.015] md:col-span-2">
     <div className="flex flex-col gap-3 border-b border-cyan-400/10 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex min-w-0 items-center gap-3"><CivitaiSampleGallery images={galleryImages} /><div className="min-w-0"><div className="flex items-center gap-2"><Library className="size-5 shrink-0 text-cyan-400" /><h3 className="truncate font-semibold text-white">{items[0].display_name || items[0].repo_id}</h3>{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer" className="grid size-7 shrink-0 place-items-center rounded-md border border-white/[.07] text-slate-500 transition hover:border-cyan-300/25 hover:bg-cyan-300/10 hover:text-cyan-300" aria-label={`在 Civitai 開啟 ${items[0].display_name || items[0].repo_id}`} title="在 Civitai 開啟原始模型頁"><ExternalLink className="size-3.5" /></a>}{isAdmin && <Button variant="ghost" size="icon" className="size-7" onClick={() => openFolder(items[0].latest_record_id, "source")} disabled={openingFolderId === items[0].latest_record_id} aria-label={`開啟 ${items[0].display_name || items[0].repo_id} 本機資料夾`} title="開啟此模型的本機資料夾">{openingFolderId === items[0].latest_record_id ? <LoaderCircle className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}</Button>}</div><div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500"><span>Civitai · Model {items[0].repo_id}</span><span aria-hidden="true">·</span><span>{items.length} 個版本</span><span aria-hidden="true">·</span><span>{totalFiles} 個檔案</span><span aria-hidden="true">·</span><span>{formatBytes(totalBytes)}</span></div></div></div>
+      <div className="flex min-w-0 items-center gap-3"><CivitaiSampleGallery images={galleryImages} /><div className="min-w-0"><div className="flex items-center gap-2"><Library className="size-5 shrink-0 text-cyan-400" /><h3 className="truncate font-semibold text-white">{items[0].display_name || items[0].repo_id}</h3>{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer" className="grid size-7 shrink-0 place-items-center rounded-md border border-white/[.07] text-slate-500 transition hover:border-cyan-300/25 hover:bg-cyan-300/10 hover:text-cyan-300" aria-label={`在 Civitai 開啟 ${items[0].display_name || items[0].repo_id}`} title="在 Civitai 開啟原始模型頁"><ExternalLink className="size-3.5" /></a>}{isAdmin && items.some((item) => item.local_availability !== "archived") && <Button variant="ghost" size="icon" className="size-7" onClick={() => openFolder(items[0].latest_record_id, "source")} disabled={openingFolderId === items[0].latest_record_id} aria-label={`開啟 ${items[0].display_name || items[0].repo_id} 本機資料夾`} title="開啟此模型的本機資料夾">{openingFolderId === items[0].latest_record_id ? <LoaderCircle className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}</Button>}</div><div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500"><span>Civitai · Model {items[0].repo_id}</span><span aria-hidden="true">·</span><span>{items.length} 個版本</span><span aria-hidden="true">·</span><span>{totalFiles} 個檔案</span><span aria-hidden="true">·</span><span>{formatBytes(totalBytes)}</span></div></div></div>
       <div className="flex shrink-0 items-center gap-2 self-start text-xs sm:self-auto"><span className={cn("size-2 rounded-full", hasChanged ? "bg-amber-400" : availableVersions === items.length ? "bg-emerald-400" : "bg-slate-500")} /><span className="text-slate-400">{hasChanged ? "本機內容需留意" : availableVersions === items.length ? "所有版本可用" : `${availableVersions} / ${items.length} 可用`}</span></div>
     </div>
-    <div className="divide-y divide-white/[.055]">{items.map((item) => <CivitaiLibraryVersionRow key={item.key} item={item} isAdmin={isAdmin} restoringId={restoringId} restore={restore} openingFolderId={openingFolderId} openFolder={openFolder} selectedTags={selectedTags} onTag={onTag} onModelType={onModelType} onBaseModel={onBaseModel} onCreator={onCreator} />)}</div>
+    <div className="px-4"><UserTagControls item={items[0]} catalog={userTags} isAdmin={isAdmin} onChanged={onTagsChanged} /></div>
+    <div className="divide-y divide-white/[.055]">{items.map((item) => <CivitaiLibraryVersionRow key={item.key} item={item} isAdmin={isAdmin} restoringId={restoringId} restore={restore} archivingId={archivingId} archiveItem={archiveItem} openingFolderId={openingFolderId} openFolder={openFolder} selectedTags={selectedTags} onTag={onTag} onModelType={onModelType} onBaseModel={onBaseModel} onCreator={onCreator} />)}</div>
   </Card>
 }
 
 function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmin: boolean; refresh: () => Promise<void> }) {
+  const dialog = useAppDialog()
   const [category, setCategory] = useStoredState<SourceCategory>("hfdm.library.category", "hf-model")
   const [query, setQuery] = useStoredState("hfdm.library.query", "")
   const [modelType, setModelType] = useStoredState("hfdm.library.model-type", "")
   const [baseModel, setBaseModel] = useStoredState("hfdm.library.base-model", "")
   const [creator, setCreator] = useStoredState("hfdm.library.creator", "")
   const [storedTags, setStoredTags] = useStoredState<string[] | string>("hfdm.library.tag", [])
+  const [selectedUserTagIds, setSelectedUserTagIds] = useStoredState<string[]>("hfdm.library.user-tags", [])
   const [comfyuiFolder, setComfyuiFolder] = useStoredState("hfdm.library.comfyui-folder", "")
+  const [showArchived, setShowArchived] = useStoredState("hfdm.library.show-archived", false)
+  const [userTags, setUserTags] = useState<UserTag[]>([])
   const [scanning, setScanning] = useState(false)
   const [restoringId, setRestoringId] = useState<string | null>(null)
+  const [archivingId, setArchivingId] = useState<string | null>(null)
   const [openingFolderId, setOpeningFolderId] = useState<string | null>(null)
   const [error, setError] = useState("")
   const selectedTags = Array.isArray(storedTags) ? storedTags : storedTags ? [storedTags] : []
   const toggleTag = (value: string) => setStoredTags(selectedTags.includes(value) ? selectedTags.filter((tag) => tag !== value) : [...selectedTags, value])
+  const toggleUserTag = (tagId: string) => setSelectedUserTagIds(selectedUserTagIds.includes(tagId) ? selectedUserTagIds.filter((id) => id !== tagId) : [...selectedUserTagIds, tagId])
+  const refreshTagsAndLibrary = useCallback(async () => {
+    const nextTags = await api.userTags()
+    setUserTags(nextTags)
+    setSelectedUserTagIds((selected) => selected.filter((id) => nextTags.some((tag) => tag.id === id)))
+    await refresh()
+  }, [refresh, setSelectedUserTagIds])
+  useEffect(() => {
+    void api.userTags().then((nextTags) => {
+      setUserTags(nextTags)
+      setSelectedUserTagIds((selected) => selected.filter((id) => nextTags.some((tag) => tag.id === id)))
+    }).catch((reason) => setError(String(reason)))
+  }, [setSelectedUserTagIds])
+  const renameCatalogTag = async (tag: UserTag) => {
+    const name = (await dialog.prompt({
+      title: "重新命名使用者標籤",
+      description: `目前有 ${tag.usage_count} 個模型使用這個標籤。`,
+      label: "標籤名稱",
+      initialValue: tag.name,
+      confirmLabel: "儲存名稱",
+      maxLength: 80,
+    }))?.trim()
+    if (!name || name === tag.name) return
+    setError("")
+    try { await api.renameUserTag(tag.id, name); await refreshTagsAndLibrary() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "標籤重新命名失敗") }
+  }
+  const deleteCatalogTag = async (tag: UserTag) => {
+    if (!await dialog.confirm({
+      title: `刪除「${tag.name}」標籤`,
+      description: `它目前套用於 ${tag.usage_count} 個模型。刪除後會解除所有關聯，但來源標籤與模型內容不受影響。`,
+      confirmLabel: "永久刪除標籤",
+      tone: "danger",
+    })) return
+    setError("")
+    try { await api.deleteUserTag(tag.id); await refreshTagsAndLibrary() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "標籤刪除失敗") }
+  }
   const rescan = async () => {
     setScanning(true)
     try { await api.reconcileHistory(); await refresh() }
@@ -743,7 +864,14 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
   const restore = async (item: LibraryItem) => {
     let token = ""
     if (item.requires_token) {
-      token = window.prompt(`此下載需要 ${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token。Token 只會保留在記憶體中。`) ?? ""
+      token = (await dialog.prompt({
+        title: "輸入存取 Token",
+        description: `此下載需要 ${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token。Token 只會保留在記憶體中。`,
+        label: `${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token`,
+        type: "password",
+        placeholder: "貼上 Token",
+        confirmLabel: "開始下載",
+      }))?.trim() ?? ""
       if (!token) return
     }
     setRestoringId(item.key); setError("")
@@ -754,18 +882,32 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     catch (reason) { setError(reason instanceof Error ? reason.message : "重新下載失敗") }
     finally { setRestoringId(null) }
   }
+  const archiveItem = async (item: LibraryItem) => {
+    if (!await dialog.confirm({
+      title: `封存「${item.display_name || item.repo_id}」`,
+      description: `將刪除 ${formatBytes(item.total_bytes)} 的本機實體內容，釋放儲存空間。\n\n模型資訊、使用者／來源標籤及 ${item.history_count} 筆傳輸歷史都會保留。`,
+      confirmLabel: "封存並刪除檔案",
+      tone: "danger",
+    })) return
+    setArchivingId(item.key); setError("")
+    try { await api.archiveLibraryItem(item.latest_record_id); await refresh() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "封存失敗") }
+    finally { setArchivingId(null) }
+  }
   const openFolder = async (recordId: string, scope: "source" | "version") => {
     setOpeningFolderId(recordId); setError("")
     try { await api.openLibraryFolder(recordId, scope) }
     catch (reason) { setError(reason instanceof Error ? reason.message : "無法開啟本機資料夾") }
     finally { setOpeningFolderId(null) }
   }
+  const archivedCount = useMemo(() => items.filter((item) => item.local_availability === "archived").length, [items])
+  const displayedItems = useMemo(() => showArchived ? items : items.filter((item) => item.local_availability !== "archived"), [items, showArchived])
   const counts = useMemo(() => ({
-    "hf-model": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-model").length,
-    "hf-dataset": items.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-dataset").length,
-    "civitai-model": new Set(items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").map((item) => item.repo_id)).size,
-  }), [items])
-  const civitaiItems = useMemo(() => items.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model"), [items])
+    "hf-model": displayedItems.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-model").length,
+    "hf-dataset": displayedItems.filter((item) => sourceCategory(item.provider, item.repo_type) === "hf-dataset").length,
+    "civitai-model": new Set(displayedItems.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model").map((item) => item.repo_id)).size,
+  }), [displayedItems])
+  const civitaiItems = useMemo(() => displayedItems.filter((item) => sourceCategory(item.provider, item.repo_type) === "civitai-model"), [displayedItems])
   const filterOptions = useMemo(() => ({
     modelTypes: [...new Set(civitaiItems.map((item) => metadataText(item.provider_metadata, "model_type")).filter(Boolean))].sort(),
     baseModels: [...new Set(civitaiItems.map((item) => metadataText(item.provider_metadata, "base_model")).filter(Boolean))].sort(),
@@ -773,14 +915,15 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
     tags: [...new Set(civitaiItems.flatMap((item) => metadataList(item.provider_metadata, "tags")))].sort(),
     folders: [...new Set(civitaiItems.flatMap((item) => item.files.map((file) => metadataText(file.provider_metadata, "comfyui_folder")).filter(Boolean)))].sort(),
   }), [civitaiItems])
-  const visible = items.filter((item) => {
+  const visible = displayedItems.filter((item) => {
     if (sourceCategory(item.provider, item.repo_type) !== category) return false
     const metadata = item.provider_metadata
     const tags = metadataList(metadata, "tags")
     const folders = item.files.map((file) => metadataText(file.provider_metadata, "comfyui_folder")).filter(Boolean)
-    const searchable = [item.display_name, item.repo_id, metadataText(metadata, "creator"), metadataText(metadata, "model_type"), metadataText(metadata, "base_model"), ...tags, ...folders].filter(Boolean).join(" ").toLocaleLowerCase()
+    const searchable = [item.display_name, item.repo_id, metadataText(metadata, "creator"), metadataText(metadata, "model_type"), metadataText(metadata, "base_model"), ...tags, ...item.user_tags.map((tag) => tag.name), ...folders].filter(Boolean).join(" ").toLocaleLowerCase()
     const normalizedQuery = query.trim().toLocaleLowerCase()
     if (normalizedQuery && !searchable.includes(normalizedQuery)) return false
+    if (selectedUserTagIds.some((tagId) => !item.user_tags.some((tag) => tag.id === tagId))) return false
     if (category === "civitai-model") {
       if (modelType && metadataText(metadata, "model_type") !== modelType) return false
       if (baseModel && metadataText(metadata, "base_model") !== baseModel) return false
@@ -795,9 +938,22 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
   return <><PageHeading eyebrow="Content library" title="內容庫與本機狀態" description="Hugging Face Model、Hugging Face Dataset 與 Civitai Model 分類管理；同一來源、版本與下載位置只顯示一次。" action={isAdmin ? <Button variant="secondary" onClick={() => void rescan()} disabled={scanning}>{scanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}重新掃描 download/</Button> : undefined} />
     <CategoryTabs value={category} onChange={(value) => value !== "all" && setCategory(value)} counts={counts} />
     <div className="mb-5 rounded-xl border border-white/[.06] bg-white/[.02] p-3">
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-600" />
-        <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋名稱、作者、模型類型、base model、標籤或 ComfyUI 目錄" />
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-600" />
+          <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜尋名稱、作者、模型類型、base model、標籤或 ComfyUI 目錄" />
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showArchived}
+          aria-label="顯示已封存模型"
+          onClick={() => setShowArchived((current) => !current)}
+          className={cn("flex h-11 shrink-0 items-center justify-between gap-3 rounded-lg border px-3.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 sm:justify-start", showArchived ? "border-cyan-300/25 bg-cyan-300/10 text-cyan-200" : "border-white/10 bg-[#0b1118] text-slate-500 hover:border-white/15 hover:text-slate-300")}
+        >
+          <span className="flex items-center gap-2"><Archive className="size-3.5" />顯示已封存 <span className="font-mono text-[10px] opacity-70">{archivedCount}</span></span>
+          <span aria-hidden="true" className={cn("relative h-5 w-9 rounded-full border transition", showArchived ? "border-cyan-300/35 bg-cyan-300/25" : "border-white/10 bg-white/[.04]")}><span className={cn("absolute top-0.5 size-3.5 rounded-full bg-current shadow-sm transition-all", showArchived ? "left-[18px]" : "left-0.5")} /></span>
+        </button>
       </div>
       {category === "civitai-model" && <><div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
         {[
@@ -812,10 +968,164 @@ function LibraryPage({ items, isAdmin, refresh }: { items: LibraryItem[]; isAdmi
         <select aria-label="加入標籤篩選" value="" onChange={(event) => { if (event.target.value) toggleTag(event.target.value) }} className="h-9 rounded-md border border-white/10 bg-[#0c131b] px-3 text-xs text-slate-300 outline-none focus:border-cyan-400/40"><option value="">加入標籤篩選…</option>{filterOptions.tags.filter((tag) => !selectedTags.includes(tag)).map((tag) => <option key={tag} value={tag}>#{tag}</option>)}</select>
         <Button variant="secondary" onClick={() => { setQuery(""); setModelType(""); setBaseModel(""); setCreator(""); setStoredTags([]); setComfyuiFolder("") }}>清除篩選</Button>
       </div>{selectedTags.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><span>符合全部標籤：</span>{selectedTags.map((tag) => <button key={tag} type="button" onClick={() => toggleTag(tag)} className="flex items-center gap-1 rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 text-cyan-200">#{tag}<X className="size-3" /></button>)}</div>}</>}
+      <div className="mt-3 border-t border-white/[.05] pt-3"><div className="flex flex-wrap items-center gap-2"><span className="text-[10px] font-bold uppercase tracking-[.16em] text-cyan-300/55">User 標籤</span><select aria-label="加入 user 標籤篩選" value="" onChange={(event) => { if (event.target.value) toggleUserTag(event.target.value) }} className="h-8 rounded-md border border-white/10 bg-[#0c131b] px-2 text-[10px] text-slate-300"><option value="">加入篩選…</option>{userTags.filter((tag) => !selectedUserTagIds.includes(tag.id)).map((tag) => <option key={tag.id} value={tag.id}>#{tag.name} ({tag.usage_count})</option>)}</select>{selectedUserTagIds.map((tagId) => { const tag = userTags.find((candidate) => candidate.id === tagId); return tag ? <button key={tag.id} type="button" onClick={() => toggleUserTag(tag.id)} className="flex items-center gap-1 rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2 py-1 text-[10px] text-cyan-200">#{tag.name}<X className="size-3" /></button> : null })}</div>{isAdmin && userTags.length > 0 && <div className="mt-2 flex flex-wrap gap-1.5">{userTags.map((tag) => <span key={tag.id} className="flex items-center gap-1 rounded-md border border-white/[.06] bg-white/[.025] px-2 py-1 text-[10px] text-slate-400"><span>#{tag.name} · {tag.usage_count}</span><button type="button" onClick={() => void renameCatalogTag(tag)} className="text-slate-600 hover:text-cyan-300" aria-label={`重新命名 ${tag.name}`}>✎</button><button type="button" onClick={() => void deleteCatalogTag(tag)} className="text-slate-600 hover:text-rose-300" aria-label={`刪除 ${tag.name}`}><Trash2 className="size-3" /></button></span>)}</div>}</div>
     </div>
     {error && <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-400/15 bg-rose-400/[.07] p-3 text-sm text-rose-300"><XCircle className="mt-0.5 size-4 shrink-0" />{error}</div>}
-    <div className="grid gap-4 md:grid-cols-2">{visible.length ? <>{regularItems.map((item) => <LibraryVersionCard key={item.key} item={item} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} openingFolderId={openingFolderId} openFolder={(recordId, scope) => void openFolder(recordId, scope)} />)}{civitaiGroups.map((group) => <CivitaiLibraryGroup key={group[0].repo_id} items={group} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} openingFolderId={openingFolderId} openFolder={(recordId, scope) => void openFolder(recordId, scope)} selectedTags={selectedTags} onTag={toggleTag} onModelType={(value) => setModelType(modelType === value ? "" : value)} onBaseModel={(value) => setBaseModel(baseModel === value ? "" : value)} onCreator={(value) => setCreator(creator === value ? "" : value)} />)}</> : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
+    <div className="grid gap-4 md:grid-cols-2">{visible.length ? <>{regularItems.map((item) => <LibraryVersionCard key={item.key} item={item} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} archivingId={archivingId} archiveItem={(target) => void archiveItem(target)} openingFolderId={openingFolderId} openFolder={(recordId, scope) => void openFolder(recordId, scope)} userTags={userTags} onTagsChanged={refreshTagsAndLibrary} />)}{civitaiGroups.map((group) => <CivitaiLibraryGroup key={group[0].repo_id} items={group} isAdmin={isAdmin} restoringId={restoringId} restore={(target) => void restore(target)} archivingId={archivingId} archiveItem={(target) => void archiveItem(target)} openingFolderId={openingFolderId} openFolder={(recordId, scope) => void openFolder(recordId, scope)} selectedTags={selectedTags} onTag={toggleTag} onModelType={(value) => setModelType(modelType === value ? "" : value)} onBaseModel={(value) => setBaseModel(baseModel === value ? "" : value)} onCreator={(value) => setCreator(creator === value ? "" : value)} userTags={userTags} onTagsChanged={refreshTagsAndLibrary} />)}</> : <div className="md:col-span-2"><EmptyState icon={Library} title={`${categoryLabels[category]} 內容庫尚無項目`} text="完成此分類的下載後，實體內容會聚合顯示在這裡。" /></div>}</div>
   </>
+}
+
+function TimelineDateEditor({ item, isAdmin, onChanged }: { item: LibraryItem; isAdmin: boolean; onChanged: () => Promise<void> }) {
+  const dialog = useAppDialog()
+  const [value, setValue] = useState(item.timeline_date ?? "")
+  const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState("")
+  const sourceDate = item.source_created_at?.slice(0, 10) ?? ""
+  const hasDateDifference = Boolean(item.timeline_date_edited_at && sourceDate && item.timeline_date !== sourceDate)
+  const hasManualDate = Boolean(item.timeline_date_edited_at && sourceDate)
+  const showSourceAction = !sourceDate || hasManualDate
+  const sourceActionTooltip = hasManualDate
+    ? hasDateDifference ? "重新取得並還原來源日期（目前與來源不同）" : "重新取得來源日期並清除手動調整狀態"
+    : "從來源取得日期"
+  useEffect(() => setValue(item.timeline_date ?? ""), [item.timeline_date])
+  const save = async () => {
+    if (value === (item.timeline_date ?? "")) return
+    setBusy(true); setError("")
+    try { await api.updateTimelineDate(item.latest_record_id, value || null); await onChanged() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "日期儲存失敗") }
+    finally { setBusy(false) }
+  }
+  const refreshSourceDate = async (applySourceDate = false) => {
+    let token = ""
+    if (item.requires_token) {
+      token = (await dialog.prompt({
+        title: applySourceDate ? "重新取得並還原來源日期" : sourceDate ? "重新取得模型來源日期" : "取得模型來源日期",
+        description: applySourceDate
+          ? `將重新查詢來源，並以最新 createdAt 取代目前的自訂日期 ${item.timeline_date ?? "未設定"}。Token 只會用於這次查詢。`
+          : `此模型可能需要 ${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token 才能讀取來源資料。Token 只會用於這次查詢。`,
+        label: `${item.provider === "civitai" ? "Civitai API" : "Hugging Face"} Token`,
+        type: "password",
+        placeholder: "貼上 Token",
+        confirmLabel: applySourceDate ? "重新取得並還原" : sourceDate ? "重新取得 createdAt" : "取得 createdAt",
+      }))?.trim() ?? ""
+      if (!token) return
+    } else if (applySourceDate && !await dialog.confirm({
+      title: "重新取得並還原來源日期",
+      description: `目前自訂日期是 ${item.timeline_date ?? "未設定"}，已記錄的來源日期是 ${sourceDate}。將重新查詢來源，並以最新 createdAt 還原模型歷史日期。`,
+      confirmLabel: "重新取得並還原",
+    })) {
+      return
+    }
+    setRefreshing(true); setError("")
+    try { await api.refreshSourceDate(item.latest_record_id, item.provider, token, applySourceDate); await onChanged() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "無法取得來源日期") }
+    finally { setRefreshing(false) }
+  }
+  return <div className="min-w-[10.5rem]">
+    <div className="flex items-center gap-1.5">
+      {isAdmin && showSourceAction && <div className="group relative shrink-0">
+        <button
+          type="button"
+          onClick={() => void refreshSourceDate(hasManualDate)}
+          disabled={refreshing}
+          className={cn(
+            "inline-flex size-9 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/35 disabled:opacity-50",
+            hasManualDate
+              ? "border-amber-300/20 bg-amber-300/[.08] text-amber-200 hover:border-amber-300/35 hover:bg-amber-300/[.14]"
+              : "border-cyan-300/15 bg-cyan-300/[.06] text-cyan-300/80 hover:border-cyan-300/30 hover:bg-cyan-300/[.12] hover:text-cyan-200",
+          )}
+          aria-label={`${sourceActionTooltip}：${item.display_name || item.repo_id}`}
+        >
+          {refreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+        </button>
+        <div role="tooltip" className="pointer-events-none absolute bottom-full left-0 z-30 mb-2 w-max max-w-56 rounded-lg border border-white/10 bg-[#111a24] px-2.5 py-1.5 text-[10px] leading-relaxed text-slate-200 opacity-0 shadow-xl shadow-black/30 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">{sourceActionTooltip}</div>
+      </div>}
+      <Input
+        type="date"
+        value={value}
+        disabled={!isAdmin || busy || refreshing}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => void save()}
+        onKeyDown={(event) => { if (event.key === "Enter") { event.currentTarget.blur() } }}
+        aria-label={`${item.display_name || item.repo_id} 模型歷史日期`}
+        className="h-9 min-w-0 bg-[#080e14] px-2.5 text-xs"
+      />
+      {busy && <LoaderCircle className="size-3.5 shrink-0 animate-spin text-cyan-300" />}
+    </div>
+    <div className={cn("mt-1 text-[9px]", hasDateDifference ? "text-amber-300/80" : "text-slate-600")}>來源 {sourceDate || "未提供"}{hasDateDifference ? " · 與自訂日期不同" : item.timeline_date_edited_at ? " · 已手動調整" : ""}</div>
+    {error && <div className="mt-1 text-[9px] text-rose-300">{error}</div>}
+  </div>
+}
+
+function DashboardPage({ items, isAdmin, refreshLibrary }: { items: LibraryItem[]; isAdmin: boolean; refreshLibrary: () => Promise<void> }) {
+  const [days, setDays] = useStoredState("hfdm.dashboard.days", 90)
+  const [data, setData] = useState<DashboardData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(new Set())
+  const load = useCallback(async () => {
+    setLoading(true); setError("")
+    try { setData(await api.dashboard(days)) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "無法載入分析資料") }
+    finally { setLoading(false) }
+  }, [days])
+  useEffect(() => { void load() }, [load])
+
+  const modelItems = useMemo(() => items.filter((item) => item.repo_type === "model"), [items])
+  const datedItems = useMemo(() => modelItems.filter((item) => item.timeline_date).sort((left, right) => String(right.timeline_date).localeCompare(String(left.timeline_date))), [modelItems])
+  const undatedItems = useMemo(() => modelItems.filter((item) => !item.timeline_date), [modelItems])
+  const history = useMemo(() => {
+    const years = new Map<string, Map<string, LibraryItem[]>>()
+    for (const item of datedItems) {
+      const year = item.timeline_date!.slice(0, 4)
+      const month = item.timeline_date!.slice(0, 7)
+      const months = years.get(year) ?? new Map<string, LibraryItem[]>()
+      months.set(month, [...(months.get(month) ?? []), item])
+      years.set(year, months)
+    }
+    return [...years.entries()].sort(([left], [right]) => right.localeCompare(left))
+  }, [datedItems])
+  const maxMonthDownloads = Math.max(1, ...(data?.months.map((month) => month.download_count) ?? [1]))
+  const maxCategory = Math.max(1, ...Object.values(data?.categories ?? {}))
+  const periodLabel = days ? `最近 ${days} 天` : "全部期間"
+  const toggleYear = (year: string) => setCollapsedYears((current) => {
+    const next = new Set(current)
+    if (next.has(year)) next.delete(year); else next.add(year)
+    return next
+  })
+
+  return <>
+    <PageHeading eyebrow="Analytics" title="模型歷史與下載分析" description="只統計成功完成的下載；按月份查看數量、內容類型與下載容量，並整理模型的年代歷史。" action={<div className="flex items-center gap-2"><select aria-label="Dashboard 統計期間" value={days} onChange={(event) => setDays(Number(event.target.value))} className="h-10 rounded-lg border border-white/10 bg-[#0c131b] px-3 text-xs text-slate-300"><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option><option value={365}>最近一年</option><option value={0}>全部期間</option></select><Button variant="secondary" size="icon" onClick={() => void load()} disabled={loading} aria-label="重新整理 Dashboard">{loading ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div>} />
+    {error && <div className="mb-5 rounded-lg border border-rose-400/20 bg-rose-400/10 p-3 text-sm text-rose-300">{error}</div>}
+    <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <MetricCard icon={Download} label="成功下載" value={String(data?.download_count ?? 0)} note={periodLabel} />
+      <MetricCard icon={Library} label="唯一模型／版本" value={String(data?.unique_model_count ?? 0)} note="同版本重載不重複計算" />
+      <MetricCard icon={HardDrive} label="下載容量" value={formatBytes(data?.total_bytes ?? 0)} note="成功 attempts 實際容量" />
+      <MetricCard icon={Archive} label="已封存" value={String(data?.archived_model_count ?? 0)} note={`估算釋放 ${formatBytes(data?.archived_bytes ?? 0)}`} />
+      <MetricCard icon={CircleGauge} label="目前內容容量" value={formatBytes(data?.active_bytes ?? 0)} note="排除已封存內容" />
+    </div>
+
+    <div className="mb-5 grid gap-4 xl:grid-cols-[1.65fr_1fr]">
+      <Card><CardHeader><div className="flex items-center justify-between"><div><h2 className="font-semibold text-white">月度下載趨勢</h2><p className="mt-1 text-xs text-slate-600">成功下載數量、唯一模型與總容量</p></div><CalendarDays className="size-5 text-cyan-300/60" /></div></CardHeader><CardContent>
+        {data?.months.length ? <div className="space-y-3">{data.months.map((month) => <div key={month.month} className="rounded-xl border border-white/[.06] bg-white/[.018] p-3"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="font-mono text-xs font-semibold text-slate-300">{month.month}</div><div className="flex flex-wrap gap-x-3 text-[10px] text-slate-500"><span>{month.download_count} 次下載</span><span>{month.unique_model_count} 個模型</span><span>{formatBytes(month.total_bytes)}</span></div></div><div className="h-2 overflow-hidden rounded-full bg-white/[.04]"><div className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-cyan-300" style={{ width: `${Math.max(4, month.download_count / maxMonthDownloads * 100)}%` }} /></div><div className="mt-2 flex flex-wrap gap-1.5">{Object.entries(month.categories).map(([category, count]) => <Badge key={category}>{category} · {count}</Badge>)}</div></div>)}</div> : <div className="py-12 text-center text-sm text-slate-600">{loading ? "載入中…" : "這個期間沒有成功下載紀錄"}</div>}
+      </CardContent></Card>
+      <Card><CardHeader><h2 className="font-semibold text-white">下載類型組成</h2><p className="mt-1 text-xs text-slate-600">{periodLabel}</p></CardHeader><CardContent><div className="space-y-4">{Object.entries(data?.categories ?? {}).map(([category, count]) => <div key={category}><div className="mb-1.5 flex justify-between text-xs"><span className="text-slate-400">{category}</span><span className="font-mono text-slate-500">{count}</span></div><div className="h-2 rounded-full bg-white/[.04]"><div className="h-full rounded-full bg-cyan-400/70" style={{ width: `${count / maxCategory * 100}%` }} /></div></div>)}{!Object.keys(data?.categories ?? {}).length && <div className="py-12 text-center text-sm text-slate-600">尚無資料</div>}</div></CardContent></Card>
+    </div>
+
+    <Card className="mb-5 overflow-hidden"><CardHeader><div className="flex items-center justify-between"><div><h2 className="font-semibold text-white">模型歷史</h2><p className="mt-1 text-xs text-slate-600">按模型歷史日期分組；年份可折疊，日期可人工校正。</p></div><Badge>{modelItems.length} 個模型版本</Badge></div></CardHeader><CardContent className="p-0">
+      {history.map(([year, months]) => <section key={year} className="border-t border-white/[.06]"><button type="button" onClick={() => toggleYear(year)} className="flex w-full items-center justify-between bg-white/[.018] px-4 py-3 text-left hover:bg-white/[.035]"><span className="text-lg font-semibold text-white">{year}</span><span className="flex items-center gap-2 text-xs text-slate-500">{[...months.values()].reduce((sum, list) => sum + list.length, 0)} 個版本<ChevronDown className={cn("size-4 transition", collapsedYears.has(year) && "-rotate-90")} /></span></button>{!collapsedYears.has(year) && [...months.entries()].sort(([left], [right]) => right.localeCompare(left)).map(([month, monthItems]) => <div key={month} className="border-t border-white/[.045]"><div className="bg-black/10 px-4 py-2 font-mono text-[10px] font-semibold uppercase tracking-[.16em] text-cyan-300/55">{month}</div><div className="divide-y divide-white/[.04]">{monthItems.map((item) => <HistoryModelRow key={item.key} item={item} isAdmin={isAdmin} onChanged={refreshLibrary} />)}</div></div>)}</section>)}
+      {undatedItems.length > 0 && <section className="border-t border-amber-400/15"><div className="bg-amber-400/[.045] px-4 py-3"><div className="font-semibold text-amber-200">待整理日期</div><div className="mt-1 text-xs text-amber-300/50">來源未提供日期或既有紀錄尚未回填</div></div><div className="divide-y divide-white/[.04]">{undatedItems.map((item) => <HistoryModelRow key={item.key} item={item} isAdmin={isAdmin} onChanged={refreshLibrary} />)}</div></section>}
+      {!modelItems.length && <div className="p-10 text-center text-sm text-slate-600">內容庫尚無模型</div>}
+    </CardContent></Card>
+
+    <Card><CardHeader><h2 className="font-semibold text-white">近期成功下載</h2></CardHeader><CardContent><div className="divide-y divide-white/[.04]">{data?.recent_downloads.map((entry) => <div key={`${entry.record_id}:${entry.completed_at}`} className="flex flex-col justify-between gap-2 py-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="truncate text-sm text-slate-300">{entry.display_name || entry.repo_id}</div><div className="mt-1 text-[10px] text-slate-600">{entry.provider === "civitai" ? "Civitai" : "Hugging Face"} · {entry.repo_type}</div></div><div className="flex shrink-0 items-center gap-3 text-[10px] text-slate-500"><span>{new Date(entry.completed_at).toLocaleString("zh-TW")}</span><span className="font-mono">{formatBytes(entry.total_bytes)}</span></div></div>)}{!data?.recent_downloads.length && <div className="py-8 text-center text-sm text-slate-600">尚無成功下載</div>}</div></CardContent></Card>
+  </>
+}
+
+function HistoryModelRow({ item, isAdmin, onChanged }: { item: LibraryItem; isAdmin: boolean; onChanged: () => Promise<void> }) {
+  const availability = availabilityMeta[item.local_availability] ?? availabilityMeta.unknown
+  return <div className={cn("flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between", item.local_availability === "archived" && "border-l-2 border-rose-400/60 bg-rose-400/[.07]")}><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="truncate text-sm font-medium text-slate-200">{item.display_name || item.repo_id}</span><SourceBadge provider={item.provider} repoType={item.repo_type} /><Badge className={availability.className}>{availability.label}</Badge></div><div className="mt-1 flex flex-wrap gap-x-2 text-[10px] text-slate-600"><span>{metadataText(item.provider_metadata, "version_name") || item.requested_revision}</span><span>{formatBytes(item.total_bytes)}</span>{item.user_tags.map((tag) => <span key={tag.id}>#{tag.name}</span>)}</div></div><TimelineDateEditor item={item} isAdmin={isAdmin} onChanged={onChanged} /></div>
 }
 
 function SettingsPage({ isAdmin }: { isAdmin: boolean }) {

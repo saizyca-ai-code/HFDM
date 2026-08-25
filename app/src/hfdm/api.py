@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import mimetypes
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from huggingface_hub.errors import HfHubHTTPError
 
@@ -20,6 +21,7 @@ from .repo_ref import InvalidRepoReference
 from .schemas import (
     AppSettingsView,
     CreateTaskRequest,
+    DashboardView,
     IdentityView,
     InspectTaskRequest,
     LibraryItemView,
@@ -27,10 +29,15 @@ from .schemas import (
     RepoResolveRequest,
     RedownloadTaskRequest,
     ResumeTaskRequest,
+    SourceDateRefreshRequest,
+    SourceDateRefreshResult,
     TaskConfigurationResult,
     TaskInspection,
     TaskView,
+    TimelineDateRequest,
     UpdateTaskConfigurationRequest,
+    UserTagRequest,
+    UserTagView,
 )
 
 
@@ -120,6 +127,145 @@ def create_router(
     @router.get("/library", response_model=list[LibraryItemView])
     def list_library() -> list[dict]:
         return db.list_library_items()
+
+    @router.put(
+        "/library/{record_id}/timeline-date",
+        dependencies=[Depends(require_admin)],
+    )
+    def update_library_timeline_date(record_id: str, payload: TimelineDateRequest) -> dict[str, Any]:
+        try:
+            db.set_library_timeline_date(
+                record_id,
+                payload.timeline_date.isoformat() if payload.timeline_date else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"updated": True}
+
+    @router.post(
+        "/library/{record_id}/refresh-source-date",
+        response_model=SourceDateRefreshResult,
+        dependencies=[Depends(require_admin)],
+    )
+    def refresh_library_source_date(
+        record_id: str,
+        payload: SourceDateRefreshRequest,
+    ) -> dict[str, Any]:
+        task = db.get_task(record_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="找不到內容庫項目")
+        token = task_token(task, payload)
+        try:
+            if task["provider"] == "civitai":
+                created_at, updated_at = civitai.source_dates(
+                    task["repo_id"],
+                    task["commit_hash"],
+                    token,
+                )
+            else:
+                created_at, updated_at = hf.source_dates(
+                    task["repo_id"],
+                    task["commit_hash"],
+                    token,
+                    task["repo_type"],
+                )
+            if not created_at:
+                raise HTTPException(status_code=422, detail="模型來源沒有提供 createdAt")
+            return db.set_library_source_dates(
+                record_id,
+                created_at,
+                updated_at,
+                apply_source_date=payload.apply_source_date,
+            )
+        except CivitaiServiceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except HfHubHTTPError as exc:
+            code = exc.response.status_code if exc.response else 502
+            raise HTTPException(
+                status_code=code if code in {401, 403, 404} else 502,
+                detail="無法取得 Hugging Face createdAt，請確認 repo、權限或 token",
+            ) from exc
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            provider = "Civitai" if task["provider"] == "civitai" else "Hugging Face"
+            raise HTTPException(status_code=502, detail=f"取得 {provider} createdAt 失敗：{exc}") from exc
+
+    @router.get("/dashboard", response_model=DashboardView)
+    def dashboard(days: int = Query(default=90, ge=0, le=3650)) -> dict[str, Any]:
+        return db.dashboard(days)
+
+    @router.post(
+        "/library/{record_id}/archive",
+        dependencies=[Depends(require_admin)],
+    )
+    def archive_library_item(record_id: str) -> dict[str, Any]:
+        try:
+            return manager.archive_library_item(record_id)
+        except DownloadManagerError as exc:
+            raise command_error(exc) from exc
+
+    @router.get("/user-tags", response_model=list[UserTagView])
+    def list_user_tags() -> list[dict[str, Any]]:
+        return db.list_user_tags()
+
+    @router.post(
+        "/user-tags",
+        response_model=UserTagView,
+        status_code=201,
+        dependencies=[Depends(require_admin)],
+    )
+    def create_user_tag(payload: UserTagRequest) -> dict[str, Any]:
+        try:
+            return db.create_user_tag(str(uuid.uuid4()), payload.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.put(
+        "/user-tags/{tag_id}",
+        response_model=UserTagView,
+        dependencies=[Depends(require_admin)],
+    )
+    def rename_user_tag(tag_id: str, payload: UserTagRequest) -> dict[str, Any]:
+        try:
+            return db.rename_user_tag(tag_id, payload.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404 if "找不到" in str(exc) else 422, detail=str(exc)) from exc
+
+    @router.delete(
+        "/user-tags/{tag_id}",
+        status_code=204,
+        dependencies=[Depends(require_admin)],
+    )
+    def delete_user_tag(tag_id: str) -> None:
+        try:
+            db.delete_user_tag(tag_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.put(
+        "/library/{record_id}/user-tags/{tag_id}",
+        status_code=204,
+        dependencies=[Depends(require_admin)],
+    )
+    def add_library_user_tag(record_id: str, tag_id: str) -> None:
+        try:
+            db.add_user_tag_to_record(record_id, tag_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.delete(
+        "/library/{record_id}/user-tags/{tag_id}",
+        status_code=204,
+        dependencies=[Depends(require_admin)],
+    )
+    def remove_library_user_tag(record_id: str, tag_id: str) -> None:
+        try:
+            db.remove_user_tag_from_record(record_id, tag_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.post(
         "/library/{record_id}/open-folder",

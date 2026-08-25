@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr
@@ -19,7 +19,7 @@ TaskStatus = Literal[
     "cancelled",
 ]
 
-LocalAvailability = Literal["available", "partial", "moved", "changed", "unknown"]
+LocalAvailability = Literal["available", "partial", "moved", "archived", "changed", "unknown"]
 RepoType = Literal["model", "dataset"]
 Provider = Literal["huggingface", "civitai"]
 
@@ -164,6 +164,34 @@ class LibraryFileView(BaseModel):
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class UserTagView(BaseModel):
+    id: str
+    name: str
+    usage_count: int = 0
+
+
+class UserTagRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+
+class TimelineDateRequest(BaseModel):
+    timeline_date: date | None = None
+
+
+class SourceDateRefreshRequest(BaseModel):
+    hf_token: SecretStr | None = None
+    civitai_token: SecretStr | None = None
+    apply_source_date: bool = False
+
+
+class SourceDateRefreshResult(BaseModel):
+    source_created_at: datetime
+    source_updated_at: datetime | None = None
+    timeline_date: date | None = None
+    timeline_date_preserved: bool = False
+    timeline_date_restored: bool = False
+
+
 class LibraryItemView(BaseModel):
     key: str
     provider: str
@@ -179,9 +207,46 @@ class LibraryItemView(BaseModel):
     total_bytes: int
     requires_token: bool
     display_name: str | None = None
+    source_created_at: datetime | None = None
+    source_updated_at: datetime | None = None
+    timeline_date: date | None = None
+    timeline_date_edited_at: datetime | None = None
     provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    user_tags: list[UserTagView] = Field(default_factory=list)
     restore_record_ids: list[str] = Field(default_factory=list)
     files: list[LibraryFileView] = Field(default_factory=list)
+
+
+class DashboardMonthView(BaseModel):
+    month: str
+    download_count: int
+    unique_model_count: int
+    total_bytes: int
+    categories: dict[str, int] = Field(default_factory=dict)
+
+
+class DashboardRecentDownloadView(BaseModel):
+    record_id: str
+    provider: str
+    repo_type: str
+    repo_id: str
+    display_name: str | None = None
+    completed_at: datetime
+    total_bytes: int
+
+
+class DashboardView(BaseModel):
+    days: int
+    period_start: datetime | None = None
+    download_count: int
+    unique_model_count: int
+    total_bytes: int
+    archived_model_count: int
+    archived_bytes: int
+    active_bytes: int
+    months: list[DashboardMonthView] = Field(default_factory=list)
+    categories: dict[str, int] = Field(default_factory=dict)
+    recent_downloads: list[DashboardRecentDownloadView] = Field(default_factory=list)
 
 
 class AppSettingsView(BaseModel):
